@@ -6,6 +6,7 @@ import { FeaturesGrid } from '@/components/landing/features-grid'
 import { HowItWorks } from '@/components/landing/how-it-works'
 import { FeatureSpotlight } from '@/components/landing/feature-spotlight'
 import { FAQ } from '@/components/landing/faq'
+import { OpenSource } from '@/components/landing/open-source'
 import { CtaBanner } from '@/components/landing/cta-banner'
 import { Footer } from '@/components/landing/footer'
 import { InboxMock } from '@/components/landing/mock/inbox-mock'
@@ -104,6 +105,8 @@ export default function LandingPage() {
           reverse
           visual={<AnalyticsMock />}
         />
+
+        <OpenSource />
 
         <FAQ />
 

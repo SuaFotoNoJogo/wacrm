@@ -5,6 +5,7 @@ import { useEffect, useState } from 'react'
 import { MessageSquare, Menu, X } from 'lucide-react'
 import { createClient } from '@/lib/supabase/client'
 import { cn } from '@/lib/utils'
+import { GithubIcon } from './github-icon'
 
 /**
  * Landing-page top nav. Client component because we need to flip the
@@ -17,8 +18,11 @@ type AuthState = 'pending' | 'signed-in' | 'signed-out'
 const LINKS = [
   { href: '#features', label: 'Features' },
   { href: '#how-it-works', label: 'How it works' },
+  { href: '#self-host', label: 'Self-host' },
   { href: '#faq', label: 'FAQ' },
 ]
+
+const REPO_URL = 'https://github.com/ArnasDon/wacrm'
 
 export function LandingNav() {
   const [auth, setAuth] = useState<AuthState>('pending')
@@ -75,6 +79,15 @@ export function LandingNav() {
         </nav>
 
         <div className="hidden items-center gap-2 md:flex">
+          <a
+            href={REPO_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+            aria-label="View source on GitHub"
+            className="flex h-9 w-9 items-center justify-center rounded-lg text-slate-300 transition-colors hover:bg-slate-800 hover:text-white"
+          >
+            <GithubIcon className="h-4 w-4" />
+          </a>
           <NavCtas auth={auth} />
         </div>
 
@@ -101,6 +114,16 @@ export function LandingNav() {
                 {l.label}
               </Link>
             ))}
+            <a
+              href={REPO_URL}
+              target="_blank"
+              rel="noopener noreferrer"
+              onClick={() => setMobileOpen(false)}
+              className="flex items-center gap-2 rounded-md px-3 py-2 text-sm text-slate-300 hover:bg-slate-800 hover:text-white"
+            >
+              <GithubIcon className="h-4 w-4" />
+              GitHub
+            </a>
             <div className="mt-2 flex flex-col gap-2 border-t border-slate-800 pt-3">
               <NavCtas auth={auth} mobile />
             </div>
