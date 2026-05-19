@@ -231,46 +231,44 @@ export function MessageBubble({
   const isAgent = message.sender_type === "agent" || message.sender_type === "bot";
   const time = format(new Date(message.created_at), "HH:mm");
 
+  // Row alignment + width cap are owned by <MessageActions> so its hover
+  // group matches the bubble's content area, not the full row.
   return (
     <div
-      className={cn("flex w-full", isAgent ? "justify-end" : "justify-start")}
+      className={cn(
+        "flex flex-col",
+        isAgent ? "items-end" : "items-start",
+      )}
     >
       <div
         className={cn(
-          "flex max-w-[75%] flex-col",
-          isAgent ? "items-end" : "items-start",
+          "relative rounded-2xl px-3 py-2",
+          isAgent
+            ? "rounded-br-md bg-violet-600 text-white"
+            : "rounded-bl-md bg-slate-800 text-slate-100",
         )}
       >
+        {reply && (
+          <ReplyQuote authorLabel={reply.authorLabel} preview={reply.preview} />
+        )}
+        <MessageContent message={message} />
         <div
           className={cn(
-            "relative rounded-2xl px-3 py-2",
-            isAgent
-              ? "rounded-br-md bg-violet-600 text-white"
-              : "rounded-bl-md bg-slate-800 text-slate-100",
+            "mt-1 flex items-center gap-1",
+            isAgent ? "justify-end" : "justify-start",
           )}
         >
-          {reply && (
-            <ReplyQuote authorLabel={reply.authorLabel} preview={reply.preview} />
-          )}
-          <MessageContent message={message} />
-          <div
-            className={cn(
-              "mt-1 flex items-center gap-1",
-              isAgent ? "justify-end" : "justify-start",
-            )}
-          >
-            <span className="text-[10px] text-white/60">{time}</span>
-            {isAgent && <StatusIcon status={message.status} />}
-          </div>
+          <span className="text-[10px] text-white/60">{time}</span>
+          {isAgent && <StatusIcon status={message.status} />}
         </div>
-        {reactions && reactions.length > 0 && onToggleReaction && (
-          <MessageReactions
-            reactions={reactions}
-            currentUserId={currentUserId}
-            onToggle={onToggleReaction}
-          />
-        )}
       </div>
+      {reactions && reactions.length > 0 && onToggleReaction && (
+        <MessageReactions
+          reactions={reactions}
+          currentUserId={currentUserId}
+          onToggle={onToggleReaction}
+        />
+      )}
     </div>
   );
 }

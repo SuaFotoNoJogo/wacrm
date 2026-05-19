@@ -258,9 +258,24 @@ export function MessageThread({
         },
         (payload) => {
           const row = payload.new as MessageReaction;
-          setReactions((prev) =>
-            prev.some((r) => r.id === row.id) ? prev : [...prev, row],
-          );
+          setReactions((prev) => {
+            if (prev.some((r) => r.id === row.id)) return prev;
+            // Swap any matching optimistic temp row for the real one so
+            // the pill doesn't double up after a successful POST.
+            const tempIdx = prev.findIndex(
+              (r) =>
+                r.id.startsWith("temp-") &&
+                r.message_id === row.message_id &&
+                r.actor_type === row.actor_type &&
+                r.actor_id === row.actor_id,
+            );
+            if (tempIdx >= 0) {
+              const copy = prev.slice();
+              copy[tempIdx] = row;
+              return copy;
+            }
+            return [...prev, row];
+          });
         },
       )
       .on(
@@ -505,69 +520,50 @@ export function MessageThread({
     [authorLabelFor],
   );
 
-  // Toggle (called from a reaction pill click). If the user already reacted
-  // with `emoji` → send "" to remove. Otherwise send `emoji` to add/swap.
-  const handleToggleReaction = useCallback(
-    async (messageId: string, emoji: string) => {
-      if (!user?.id) return;
-      const current = reactions.find(
-        (r) =>
-          r.message_id === messageId &&
-          r.actor_type === "agent" &&
-          r.actor_id === user.id,
-      );
-      const nextEmoji = current?.emoji === emoji ? "" : emoji;
-      await postReaction(messageId, nextEmoji);
-    },
-    // postReaction is defined below; React only needs the closure refs.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [reactions, user?.id],
-  );
-
-  // Add or swap to a specific emoji (called from the emoji picker bar).
-  const handleAddReaction = useCallback(
-    async (messageId: string, emoji: string) => {
-      if (!emoji) return;
-      await postReaction(messageId, emoji);
-    },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [],
-  );
-
+  // Single reaction-set primitive. emoji === "" removes; otherwise adds/swaps.
+  // The "toggle" semantic (pill click) is computed at the call site where the
+  // current reactions for the bubble are already in scope — keeps this
+  // function dependency-free w.r.t. the reaction list.
   const postReaction = useCallback(
     async (messageId: string, emoji: string) => {
-      if (!user?.id || !conversation) return;
+      if (!user?.id || !conversation) {
+        console.warn("[reactions] missing user or conversation");
+        return;
+      }
+      if (messageId.startsWith("temp-")) {
+        toast.error("Wait for the message to finish sending");
+        return;
+      }
 
-      // Snapshot for rollback. Optimistically update local state so the
-      // pill flips immediately.
-      const prev = reactions;
-      const own = prev.find(
-        (r) =>
-          r.message_id === messageId &&
-          r.actor_type === "agent" &&
-          r.actor_id === user.id,
-      );
+      const convId = conversation.id;
+      const userId = user.id;
+      let snapshot: MessageReaction[] = [];
 
-      let next: MessageReaction[];
-      if (emoji === "") {
-        next = prev.filter((r) => r !== own);
-      } else if (own) {
-        next = prev.map((r) => (r === own ? { ...own, emoji } : r));
-      } else {
-        next = [
+      // Functional updater — captures the freshest reactions list, never a
+      // stale closure. Snapshot stored for rollback on POST failure.
+      setReactions((prev) => {
+        snapshot = prev;
+        const own = prev.find(
+          (r) =>
+            r.message_id === messageId &&
+            r.actor_type === "agent" &&
+            r.actor_id === userId,
+        );
+        if (emoji === "") return own ? prev.filter((r) => r !== own) : prev;
+        if (own) return prev.map((r) => (r === own ? { ...own, emoji } : r));
+        return [
           ...prev,
           {
             id: `temp-${Date.now()}`,
             message_id: messageId,
-            conversation_id: conversation.id,
+            conversation_id: convId,
             actor_type: "agent",
-            actor_id: user.id,
+            actor_id: userId,
             emoji,
             created_at: new Date().toISOString(),
           },
         ];
-      }
-      setReactions(next);
+      });
 
       try {
         const res = await fetch("/api/whatsapp/react", {
@@ -582,10 +578,10 @@ export function MessageThread({
       } catch (err) {
         const reason = err instanceof Error ? err.message : "network error";
         toast.error(`Reaction failed: ${reason}`);
-        setReactions(prev);
+        setReactions(snapshot);
       }
     },
-    [reactions, conversation, user?.id],
+    [conversation, user?.id],
   );
 
   const handleAssignChange = useCallback(
@@ -794,21 +790,32 @@ export function MessageThread({
                         }
                       : null;
                     const msgReactions = reactionsByMessageId.get(msg.id);
+                    // Toggle is computed at the call site — `msgReactions`
+                    // and `user?.id` are already in scope, no extra hook.
+                    const handlePillToggle = (emoji: string) => {
+                      const own = msgReactions?.find(
+                        (r) =>
+                          r.actor_type === "agent" &&
+                          r.actor_id === user?.id,
+                      );
+                      const next = own?.emoji === emoji ? "" : emoji;
+                      void postReaction(msg.id, next);
+                    };
                     return (
                       <MessageActions
                         key={msg.id}
                         message={msg}
                         onReply={() => handleStartReply(msg)}
-                        onReact={(emoji) => handleAddReaction(msg.id, emoji)}
+                        onReact={(emoji) => {
+                          if (emoji) void postReaction(msg.id, emoji);
+                        }}
                       >
                         <MessageBubble
                           message={msg}
                           reply={reply}
                           reactions={msgReactions}
                           currentUserId={user?.id}
-                          onToggleReaction={(emoji) =>
-                            handleToggleReaction(msg.id, emoji)
-                          }
+                          onToggleReaction={handlePillToggle}
                         />
                       </MessageActions>
                     );

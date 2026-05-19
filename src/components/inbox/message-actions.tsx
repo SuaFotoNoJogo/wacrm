@@ -73,13 +73,20 @@ export function MessageActions({
     setTouchOpen(false);
   };
 
+  // Row alignment lives here (not in MessageBubble) so the `group/actions`
+  // hover region matches the bubble's content width — hovering empty space
+  // in the row no longer reveals the toolbar.
   return (
     <div
-      className="group/actions relative"
+      className={cn(
+        "flex w-full",
+        isAgent ? "justify-end" : "justify-start",
+      )}
       onContextMenu={handleContextMenu}
       onBlur={() => setTouchOpen(false)}
     >
-      {children}
+      <div className="group/actions relative max-w-[75%]">
+        {children}
       <div
         data-touch-open={touchOpen || pickerOpen ? "true" : undefined}
         className={cn(
@@ -129,6 +136,7 @@ export function MessageActions({
         >
           <Copy className="h-3.5 w-3.5" />
         </button>
+      </div>
       </div>
     </div>
   );
