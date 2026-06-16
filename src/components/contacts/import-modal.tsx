@@ -8,7 +8,10 @@ import {
   isUniqueViolation,
   normalizeKey,
 } from '@/lib/contacts/dedupe';
-import { parseContactCsv, type ParsedContactRow } from '@/lib/contacts/parse-contact-csv';
+import {
+  parseContactCsv,
+  type ParsedContactRow,
+} from '@/lib/contacts/parse-contact-csv';
 import {
   assignImportedContactTags,
   resolveImportTagIds,
@@ -57,7 +60,11 @@ function PreviewCell({
 }) {
   return (
     <span
-      className={cn('block truncate', maxWidth, mono && 'font-mono text-[11px]')}
+      className={cn(
+        'block truncate',
+        maxWidth,
+        mono && 'font-mono text-[11px]'
+      )}
       title={value}
     >
       {value}
@@ -77,14 +84,15 @@ function ImportPreviewTags({
   }
 
   return (
-    <div className="flex flex-wrap gap-1 min-w-[4.5rem]">
+    <div className="flex min-w-[4.5rem] flex-wrap gap-1">
       {tagNames.map((name) => {
-        const color = tagColorByKey.get(name.trim().toLowerCase()) ?? DEFAULT_TAG_COLOR;
+        const color =
+          tagColorByKey.get(name.trim().toLowerCase()) ?? DEFAULT_TAG_COLOR;
         const isKnown = tagColorByKey.has(name.trim().toLowerCase());
         return (
           <span
             key={name}
-            className="inline-flex max-w-full items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium leading-none"
+            className="inline-flex max-w-full items-center gap-1 rounded-full px-2 py-0.5 text-[10px] leading-none font-medium"
             style={{
               backgroundColor: `${color}18`,
               color,
@@ -110,7 +118,11 @@ interface ImportModalProps {
   onImported: () => void;
 }
 
-export function ImportModal({ open, onOpenChange, onImported }: ImportModalProps) {
+export function ImportModal({
+  open,
+  onOpenChange,
+  onImported,
+}: ImportModalProps) {
   const supabase = createClient();
   const { accountId, canEditSettings } = useAuth();
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -119,7 +131,9 @@ export function ImportModal({ open, onOpenChange, onImported }: ImportModalProps
   const [parsedRows, setParsedRows] = useState<ParsedContactRow[]>([]);
   const [hasTagsColumn, setHasTagsColumn] = useState(false);
   const [hasCompanyColumn, setHasCompanyColumn] = useState(false);
-  const [tagColorByKey, setTagColorByKey] = useState<Map<string, string>>(new Map());
+  const [tagColorByKey, setTagColorByKey] = useState<Map<string, string>>(
+    new Map()
+  );
   const [importing, setImporting] = useState(false);
   const [result, setResult] = useState<{
     imported: number;
@@ -151,11 +165,16 @@ export function ImportModal({ open, onOpenChange, onImported }: ImportModalProps
     setResult(null);
 
     const text = await selected.text();
-    const { rows, hasTagsColumn: csvHasTags, hasCompanyColumn: csvHasCompany } =
-      parseContactCsv(text);
+    const {
+      rows,
+      hasTagsColumn: csvHasTags,
+      hasCompanyColumn: csvHasCompany,
+    } = parseContactCsv(text);
 
     if (rows.length === 0) {
-      toast.error('No valid rows found. Ensure CSV has a "phone" column header.');
+      toast.error(
+        'No valid rows found. Ensure CSV has a "phone" column header.'
+      );
       setParsedRows([]);
       setHasTagsColumn(false);
       setHasCompanyColumn(false);
@@ -194,23 +213,29 @@ export function ImportModal({ open, onOpenChange, onImported }: ImportModalProps
       } = await supabase.auth.getSession();
       const user = session?.user;
       if (!user) throw new Error('Not authenticated');
-      if (!accountId) throw new Error('Your profile is not linked to an account.');
+      if (!accountId)
+        throw new Error('Your profile is not linked to an account.');
 
       let imported = 0;
       let skipped = 0;
       let failed = 0;
 
+      // 1) De-dupe within the file by normalized phone (keep first).
       const { unique, duplicates: inFileDupes } = dedupeByPhone(parsedRows);
       skipped += inFileDupes;
 
+      // 2) Skip numbers already in this account. One read of the
+      //    generated `phone_normalized` column (migration 022) → Set.
       const { data: existingRows } = await supabase
         .from('contacts')
         .select('phone_normalized')
         .eq('account_id', accountId);
       const existing = new Set(
         (existingRows ?? [])
-          .map((r) => (r as { phone_normalized: string | null }).phone_normalized)
-          .filter((p): p is string => !!p),
+          .map(
+            (r) => (r as { phone_normalized: string | null }).phone_normalized
+          )
+          .filter((p): p is string => !!p)
       );
 
       const toInsert = unique.filter((row) => {
@@ -221,15 +246,25 @@ export function ImportModal({ open, onOpenChange, onImported }: ImportModalProps
         return true;
       });
 
+      // 3) Resolve tag names → ids (admin+ may auto-create missing tags).
+      //    Skip the round-trip when the import carries no tag names.
       const allTagNames = toInsert.flatMap((row) => row.tagNames);
-      const { tagIdByKey, skippedNames } = await resolveImportTagIds(supabase, {
-        accountId,
-        userId: user.id,
-        tagNames: allTagNames,
-        canCreateTags: canEditSettings,
-      });
+      let tagIdByKey = new Map<string, string>();
+      let skippedNames: string[] = [];
+      if (allTagNames.length > 0) {
+        ({ tagIdByKey, skippedNames } = await resolveImportTagIds(supabase, {
+          accountId,
+          userId: user.id,
+          tagNames: allTagNames,
+          canCreateTags: canEditSettings,
+        }));
+      }
 
       const tagAssignments: ContactTagAssignment[] = [];
+
+      // 4) Batch insert the genuinely-new rows in chunks of 50. The DB
+      //    unique index is the backstop: a 23505 (race, or a format
+      //    that normalizes equal) counts as skipped, not failed.
       const chunkSize = 50;
 
       for (let i = 0; i < toInsert.length; i += chunkSize) {
@@ -249,6 +284,8 @@ export function ImportModal({ open, onOpenChange, onImported }: ImportModalProps
           .select('id');
 
         if (error) {
+          // Retry individually so one bad/duplicate row doesn't sink
+          // the whole chunk.
           for (let j = 0; j < rows.length; j++) {
             const row = rows[j];
             const source = chunk[j];
@@ -275,6 +312,9 @@ export function ImportModal({ open, onOpenChange, onImported }: ImportModalProps
         } else {
           const inserted = data ?? [];
           imported += inserted.length;
+          // inserted[j] ↔ chunk[j] only holds because a single INSERT
+          // preserves RETURNING order. If this path is ever split into
+          // parallel inserts, zip by phone or returned id instead.
           for (let j = 0; j < inserted.length; j++) {
             const source = chunk[j];
             if (!source || source.tagNames.length === 0) continue;
@@ -286,20 +326,29 @@ export function ImportModal({ open, onOpenChange, onImported }: ImportModalProps
         }
       }
 
-      const tagsAssigned = await assignImportedContactTags(
-        supabase,
-        tagAssignments,
-        tagIdByKey,
-      );
+      // 5) Wire tags onto the contacts we just created. Failure here must
+      //    not mask a successful contact import.
+      let tagsAssigned = 0;
+      try {
+        tagsAssigned = await assignImportedContactTags(
+          supabase,
+          tagAssignments,
+          tagIdByKey
+        );
+      } catch {
+        toast.warning('Contacts imported, but some tag assignments failed.');
+      }
 
       setResult({ imported, skipped, failed, tagsAssigned });
       if (imported > 0) {
-        toast.success(`${imported} contact${imported !== 1 ? 's' : ''} imported`);
+        toast.success(
+          `${imported} contact${imported !== 1 ? 's' : ''} imported`
+        );
         onImported();
       }
       if (tagsAssigned > 0) {
         toast.success(
-          `${tagsAssigned} tag assignment${tagsAssigned !== 1 ? 's' : ''} applied`,
+          `${tagsAssigned} tag assignment${tagsAssigned !== 1 ? 's' : ''} applied`
         );
       }
       if (skippedNames.length > 0) {
@@ -307,14 +356,16 @@ export function ImportModal({ open, onOpenChange, onImported }: ImportModalProps
         const more =
           skippedNames.length > 3 ? ` (+${skippedNames.length - 3} more)` : '';
         toast.info(
-          `Unknown tags skipped (create them in Settings first): ${sample}${more}`,
+          `Unknown tags skipped (create them in Settings first): ${sample}${more}`
         );
       }
       if (skipped > 0) {
         toast.info(`${skipped} duplicate${skipped !== 1 ? 's' : ''} skipped`);
       }
       if (failed > 0) {
-        toast.error(`${failed} contact${failed !== 1 ? 's' : ''} failed to import`);
+        toast.error(
+          `${failed} contact${failed !== 1 ? 's' : ''} failed to import`
+        );
       }
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'Import failed';
@@ -325,8 +376,12 @@ export function ImportModal({ open, onOpenChange, onImported }: ImportModalProps
   }
 
   const preview = parsedRows.slice(0, PREVIEW_LIMIT);
+  // Tags: OR — show when the CSV declares a column or preview rows carry
+  // values, so an all-empty tags column still renders for validation.
   const previewHasTags =
     hasTagsColumn || preview.some((row) => row.tagNames.length > 0);
+  // Company: AND — hide unless the CSV declares it and preview has data,
+  // avoiding an all-dash column that wastes horizontal space.
   const previewHasCompany =
     hasCompanyColumn && preview.some((row) => row.company?.trim());
 
@@ -346,8 +401,10 @@ export function ImportModal({ open, onOpenChange, onImported }: ImportModalProps
       <DialogContent className="flex max-h-[min(90vh,720px)] flex-col gap-0 overflow-hidden border-slate-700/80 bg-slate-900 p-0 text-slate-200 sm:max-w-2xl">
         <div className="shrink-0 space-y-4 border-b border-slate-800/80 px-6 pt-6 pb-5">
           <DialogHeader className="gap-1.5">
-            <DialogTitle className="text-lg text-white">Import Contacts</DialogTitle>
-            <DialogDescription className="text-slate-400 leading-relaxed">
+            <DialogTitle className="text-lg text-white">
+              Import Contacts
+            </DialogTitle>
+            <DialogDescription className="leading-relaxed text-slate-400">
               Upload a CSV with a required{' '}
               <code className="rounded bg-slate-800 px-1 py-0.5 text-[11px] text-slate-300">
                 phone
@@ -377,19 +434,20 @@ export function ImportModal({ open, onOpenChange, onImported }: ImportModalProps
             tabIndex={0}
             onClick={() => fileInputRef.current?.click()}
             onKeyDown={(e) => {
-              if (e.key === 'Enter' || e.key === ' ') fileInputRef.current?.click();
+              if (e.key === 'Enter' || e.key === ' ')
+                fileInputRef.current?.click();
             }}
             className={cn(
               'group flex cursor-pointer flex-col items-center justify-center gap-2 rounded-xl border border-dashed p-5 transition-all',
               file
                 ? 'border-primary/35 bg-primary/[0.04]'
-                : 'border-slate-700/80 bg-slate-950/40 hover:border-primary/40 hover:bg-slate-950/70',
+                : 'hover:border-primary/40 border-slate-700/80 bg-slate-950/40 hover:bg-slate-950/70'
             )}
           >
             {file ? (
               <>
-                <div className="flex size-10 items-center justify-center rounded-lg bg-primary/15 ring-1 ring-primary/25">
-                  <FileText className="size-5 text-primary" />
+                <div className="bg-primary/15 ring-primary/25 flex size-10 items-center justify-center rounded-lg ring-1">
+                  <FileText className="text-primary size-5" />
                 </div>
                 <p
                   className="max-w-full truncate px-2 text-sm font-medium text-slate-200"
@@ -398,7 +456,8 @@ export function ImportModal({ open, onOpenChange, onImported }: ImportModalProps
                   {truncateFilename(file.name)}
                 </p>
                 <span className="rounded-full bg-slate-800 px-2.5 py-0.5 text-[11px] font-medium text-slate-400">
-                  {parsedRows.length} row{parsedRows.length !== 1 ? 's' : ''} ready
+                  {parsedRows.length} row{parsedRows.length !== 1 ? 's' : ''}{' '}
+                  ready
                 </span>
               </>
             ) : (
@@ -406,8 +465,12 @@ export function ImportModal({ open, onOpenChange, onImported }: ImportModalProps
                 <div className="flex size-10 items-center justify-center rounded-lg bg-slate-800/80 ring-1 ring-slate-700/80 transition-colors group-hover:bg-slate-800">
                   <Upload className="size-5 text-slate-500 group-hover:text-slate-400" />
                 </div>
-                <p className="text-sm text-slate-400">Click to choose a CSV file</p>
-                <p className="text-[11px] text-slate-600">.csv up to your browser limit</p>
+                <p className="text-sm text-slate-400">
+                  Click to choose a CSV file
+                </p>
+                <p className="text-[11px] text-slate-600">
+                  .csv up to your browser limit
+                </p>
               </>
             )}
           </div>
@@ -425,13 +488,13 @@ export function ImportModal({ open, onOpenChange, onImported }: ImportModalProps
           {preview.length > 0 && !result && (
             <div className="space-y-3">
               <div className="flex flex-wrap items-center justify-between gap-2">
-                <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500">
+                <p className="text-[11px] font-semibold tracking-[0.14em] text-slate-500 uppercase">
                   Preview · first {preview.length}
                 </p>
                 <div className="flex flex-wrap items-center gap-1.5">
                   {tagStats.rowsWithTags > 0 && (
                     <span className="inline-flex items-center gap-1 rounded-md bg-slate-800/90 px-2 py-0.5 text-[11px] text-slate-400">
-                      <Tag className="size-3 text-primary/80" />
+                      <Tag className="text-primary/80 size-3" />
                       {tagStats.unique} tag{tagStats.unique !== 1 ? 's' : ''} ·{' '}
                       {tagStats.rowsWithTags} contact
                       {tagStats.rowsWithTags !== 1 ? 's' : ''}
@@ -445,22 +508,22 @@ export function ImportModal({ open, onOpenChange, onImported }: ImportModalProps
                   <table className="w-full min-w-[32rem] text-xs">
                     <thead>
                       <tr className="border-b border-slate-800 bg-slate-950/60">
-                        <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-slate-500">
+                        <th className="px-3 py-2 text-left font-medium whitespace-nowrap text-slate-500">
                           Phone
                         </th>
-                        <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-slate-500">
+                        <th className="px-3 py-2 text-left font-medium whitespace-nowrap text-slate-500">
                           Name
                         </th>
-                        <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-slate-500">
+                        <th className="px-3 py-2 text-left font-medium whitespace-nowrap text-slate-500">
                           Email
                         </th>
                         {previewHasCompany && (
-                          <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-slate-500">
+                          <th className="px-3 py-2 text-left font-medium whitespace-nowrap text-slate-500">
                             Company
                           </th>
                         )}
                         {previewHasTags && (
-                          <th className="whitespace-nowrap px-3 py-2 text-left font-medium text-slate-500">
+                          <th className="px-3 py-2 text-left font-medium whitespace-nowrap text-slate-500">
                             Tags
                           </th>
                         )}
@@ -472,8 +535,12 @@ export function ImportModal({ open, onOpenChange, onImported }: ImportModalProps
                           key={i}
                           className="bg-slate-900/40 transition-colors hover:bg-slate-800/30"
                         >
-                          <td className="whitespace-nowrap px-3 py-2 text-slate-300">
-                            <PreviewCell value={row.phone} mono maxWidth="max-w-[7.5rem]" />
+                          <td className="px-3 py-2 whitespace-nowrap text-slate-300">
+                            <PreviewCell
+                              value={row.phone}
+                              mono
+                              maxWidth="max-w-[7.5rem]"
+                            />
                           </td>
                           <td className="px-3 py-2 text-slate-200">
                             <PreviewCell
@@ -524,7 +591,7 @@ export function ImportModal({ open, onOpenChange, onImported }: ImportModalProps
               <p className="text-sm font-medium text-white">Import complete</p>
               <div className="mt-3 flex flex-wrap gap-3">
                 {result.imported > 0 && (
-                  <div className="flex items-center gap-1.5 text-sm text-primary">
+                  <div className="text-primary flex items-center gap-1.5 text-sm">
                     <CheckCircle className="size-4 shrink-0" />
                     {result.imported} imported
                   </div>
@@ -532,7 +599,8 @@ export function ImportModal({ open, onOpenChange, onImported }: ImportModalProps
                 {result.tagsAssigned > 0 && (
                   <div className="flex items-center gap-1.5 text-sm text-cyan-400">
                     <CheckCircle className="size-4 shrink-0" />
-                    {result.tagsAssigned} tag{result.tagsAssigned !== 1 ? 's' : ''} assigned
+                    {result.tagsAssigned} tag
+                    {result.tagsAssigned !== 1 ? 's' : ''} assigned
                   </div>
                 )}
                 {result.skipped > 0 && (

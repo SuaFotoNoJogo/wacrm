@@ -1,6 +1,6 @@
-import type { SupabaseClient } from "@supabase/supabase-js";
+import type { SupabaseClient } from '@supabase/supabase-js';
 
-const DEFAULT_TAG_COLOR = "#3b82f6";
+const DEFAULT_TAG_COLOR = '#3b82f6';
 
 export interface ResolveImportTagsResult {
   /** Lowercase tag name → tag id. */
@@ -14,6 +14,9 @@ export interface ResolveImportTagsResult {
  * are matched case-insensitively. Missing names are created when
  * `canCreateTags` is true (admin+); otherwise they are reported in
  * `skippedNames`.
+ *
+ * Unlike the manual contact form (existing tags only), import may
+ * auto-create missing tag definitions for admin+ callers.
  */
 export async function resolveImportTagIds(
   supabase: SupabaseClient,
@@ -23,7 +26,7 @@ export async function resolveImportTagIds(
     tagNames: string[];
     canCreateTags: boolean;
     defaultColor?: string;
-  },
+  }
 ): Promise<ResolveImportTagsResult> {
   const { accountId, userId, tagNames, canCreateTags } = params;
   const defaultColor = params.defaultColor ?? DEFAULT_TAG_COLOR;
@@ -39,10 +42,14 @@ export async function resolveImportTagIds(
     uniqueNames.push(name);
   }
 
+  if (uniqueNames.length === 0) {
+    return { tagIdByKey: new Map(), skippedNames: [] };
+  }
+
   const { data: existing, error: fetchError } = await supabase
-    .from("tags")
-    .select("id, name")
-    .eq("account_id", accountId);
+    .from('tags')
+    .select('id, name')
+    .eq('account_id', accountId);
 
   if (fetchError) throw fetchError;
 
@@ -64,16 +71,16 @@ export async function resolveImportTagIds(
 
   if (toCreate.length > 0) {
     const { data: created, error: createError } = await supabase
-      .from("tags")
+      .from('tags')
       .insert(
         toCreate.map((name) => ({
           user_id: userId,
           account_id: accountId,
           name,
           color: defaultColor,
-        })),
+        }))
       )
-      .select("id, name");
+      .select('id, name');
 
     if (createError) throw createError;
 
@@ -90,11 +97,17 @@ export interface ContactTagAssignment {
   tagNames: string[];
 }
 
-/** Insert contact_tags rows for imported contacts (ignores duplicates). */
+/**
+ * Insert contact_tags rows for imported contacts (ignores duplicates).
+ *
+ * Returns the number of contact–tag pairs *requested* for upsert, not
+ * rows actually inserted — `ignoreDuplicates` can drop pairs that already
+ * exist without changing the returned count.
+ */
 export async function assignImportedContactTags(
   supabase: SupabaseClient,
   assignments: ContactTagAssignment[],
-  tagIdByKey: Map<string, string>,
+  tagIdByKey: Map<string, string>
 ): Promise<number> {
   const rows: { contact_id: string; tag_id: string }[] = [];
 
@@ -115,8 +128,8 @@ export async function assignImportedContactTags(
 
   for (let i = 0; i < rows.length; i += chunkSize) {
     const chunk = rows.slice(i, i + chunkSize);
-    const { error } = await supabase.from("contact_tags").upsert(chunk, {
-      onConflict: "contact_id,tag_id",
+    const { error } = await supabase.from('contact_tags').upsert(chunk, {
+      onConflict: 'contact_id,tag_id',
       ignoreDuplicates: true,
     });
     if (error) throw error;

@@ -46,18 +46,18 @@ export function parseContactCsv(text: string): ParseContactCsvResult {
   }
 
   const headers = lines[0]
-    .split(",")
-    .map((h) => h.trim().toLowerCase().replace(/["']/g, ""));
+    .split(',')
+    .map((h) => h.trim().toLowerCase().replace(/["']/g, ''));
 
-  const phoneIdx = headers.indexOf("phone");
+  const phoneIdx = headers.indexOf('phone');
   if (phoneIdx === -1) {
     return { rows: [], hasTagsColumn: false, hasCompanyColumn: false };
   }
 
-  const nameIdx = headers.indexOf("name");
-  const emailIdx = headers.indexOf("email");
-  const companyIdx = headers.indexOf("company");
-  const tagsIdx = headers.indexOf("tags");
+  const nameIdx = headers.indexOf('name');
+  const emailIdx = headers.indexOf('email');
+  const companyIdx = headers.indexOf('company');
+  const tagsIdx = headers.indexOf('tags');
 
   const rows: ParsedContactRow[] = [];
 
@@ -66,25 +66,25 @@ export function parseContactCsv(text: string): ParseContactCsvResult {
     if (!line) continue;
 
     const values = parseCsvLine(line);
-    const phone = values[phoneIdx]?.replace(/["']/g, "").trim();
+    const phone = values[phoneIdx]?.replace(/["']/g, '').trim();
     if (!phone) continue;
 
     rows.push({
       phone,
       name:
         nameIdx >= 0
-          ? values[nameIdx]?.replace(/["']/g, "").trim() || undefined
+          ? values[nameIdx]?.replace(/["']/g, '').trim() || undefined
           : undefined,
       email:
         emailIdx >= 0
-          ? values[emailIdx]?.replace(/["']/g, "").trim() || undefined
+          ? values[emailIdx]?.replace(/["']/g, '').trim() || undefined
           : undefined,
       company:
         companyIdx >= 0
-          ? values[companyIdx]?.replace(/["']/g, "").trim() || undefined
+          ? values[companyIdx]?.replace(/["']/g, '').trim() || undefined
           : undefined,
       tagNames:
-        tagsIdx >= 0 ? parseTagCell(values[tagsIdx]?.replace(/["']/g, "")) : [],
+        tagsIdx >= 0 ? parseTagCell(values[tagsIdx]?.replace(/["']/g, '')) : [],
     });
   }
 
@@ -98,15 +98,15 @@ export function parseContactCsv(text: string): ParseContactCsvResult {
 /** Simple CSV line parse (handles quoted fields). */
 function parseCsvLine(line: string): string[] {
   const values: string[] = [];
-  let current = "";
+  let current = '';
   let inQuotes = false;
 
   for (const char of line) {
     if (char === '"') {
       inQuotes = !inQuotes;
-    } else if (char === "," && !inQuotes) {
+    } else if (char === ',' && !inQuotes) {
       values.push(current.trim());
-      current = "";
+      current = '';
     } else {
       current += char;
     }
