@@ -31,8 +31,8 @@ export interface AudienceConfig {
  */
 export type VariableMapping =
   | { type: 'static'; value: string }
-  | { type: 'field'; value: string }
-  | { type: 'custom_field'; value: string };
+  | { type: 'field'; value: string; fallback?: string }
+  | { type: 'custom_field'; value: string; fallback?: string };
 
 interface BroadcastPayload {
   name: string;
@@ -84,37 +84,54 @@ type CustomValueIndex = Map<string, Map<string, string>>;
  * built-in-field mappings resolve synchronously; custom fields read
  * from a pre-built index to avoid N+1 queries during the send loop.
  */
+function resolveOneVariable(
+  v: VariableMapping,
+  contact: Contact,
+  customValues?: Map<string, string>,
+): string {
+  if (v.type === 'static') return v.value;
+  if (v.type === 'field') {
+    const fieldMap: Record<string, string | undefined> = {
+      name: contact.name,
+      phone: contact.phone,
+      email: contact.email,
+      company: contact.company,
+    };
+    return fieldMap[v.value] ?? v.fallback ?? '';
+  }
+  // custom_field
+  return customValues?.get(v.value) ?? v.fallback ?? '';
+}
+
 export function resolveVariables(
   variables: Record<string, VariableMapping>,
   contact: Contact,
   customValues?: Map<string, string>,
 ): string[] {
-  // Keys are typically "1","2",... — numeric-aware sort keeps
-  // {{1}} before {{10}}.
-  const keys = Object.keys(variables).sort((a, b) => {
-    const an = Number(a);
-    const bn = Number(b);
-    if (Number.isFinite(an) && Number.isFinite(bn)) return an - bn;
-    return a.localeCompare(b);
-  });
+  const keys = Object.keys(variables);
+  // Numbered keys ({{1}}, {{2}}…): sort numerically.
+  const allNumeric = keys.every((k) => Number.isFinite(Number(k)));
+  if (allNumeric) {
+    keys.sort((a, b) => Number(a) - Number(b));
+  }
+  return keys.map((key) => resolveOneVariable(variables[key], contact, customValues));
+}
 
-  return keys.map((key) => {
-    const v = variables[key];
-    if (v.type === 'static') return v.value;
-
-    if (v.type === 'field') {
-      const fieldMap: Record<string, string | undefined> = {
-        name: contact.name,
-        phone: contact.phone,
-        email: contact.email,
-        company: contact.company,
-      };
-      return fieldMap[v.value] ?? '';
-    }
-
-    // custom_field
-    return customValues?.get(v.value) ?? '';
-  });
+/**
+ * For templates with named variables ({{nome_cliente}}), Meta requires
+ * each parameter to carry a `parameter_name` field. Returns an array of
+ * { value, paramName } pairs preserving the order of first appearance in
+ * the template body, which is the order the caller built `variables` in.
+ */
+export function resolveNamedVariables(
+  variables: Record<string, VariableMapping>,
+  contact: Contact,
+  customValues?: Map<string, string>,
+): { value: string; paramName: string }[] {
+  return Object.keys(variables).map((key) => ({
+    value: resolveOneVariable(variables[key], contact, customValues),
+    paramName: key,
+  }));
 }
 
 /**
@@ -293,9 +310,22 @@ export function useBroadcastSending(): UseBroadcastSendingReturn {
   ): Promise<Contact[]> {
     const { fieldId, operator, value } = filter;
 
-    // Build the WHERE clause for the operator. PostgREST supports
-    // eq/neq/ilike via the query builder — use ilike with wildcards
-    // for "contains" so the match is case-insensitive.
+    // Standard contact fields (name, email, phone, company) are stored in
+    // the contacts table directly. Custom fields go through contact_custom_values.
+    if (fieldId.startsWith('__contact_')) {
+      const rawCol = fieldId.replace('__contact_', '');
+      // phone_normalized contains only digits, making phone searches resilient
+      // to formatting differences (+55, spaces, dashes in the raw phone column).
+      const col = rawCol === 'phone' ? 'phone_normalized' : rawCol;
+      let q = supabase.from('contacts').select('*');
+      if (operator === 'is') q = q.eq(col, value);
+      else if (operator === 'is_not') q = q.neq(col, value);
+      else q = q.ilike(col, `%${value}%`);
+      const { data, error } = await q;
+      if (error) throw new Error(`Contact field filter failed: ${error.message}`);
+      return data ?? [];
+    }
+
     let query = supabase
       .from('contact_custom_values')
       .select('contact_id')
@@ -451,25 +481,45 @@ export function useBroadcastSending(): UseBroadcastSendingReturn {
         headerType === 'video' ||
         headerType === 'document';
       const headerMediaUrl = payload.headerMediaUrl?.trim();
-      const messageParams =
+      const sharedMessageParams =
         isMediaHeader && headerMediaUrl ? { headerMediaUrl } : undefined;
+
+      // Detect whether this template uses named ({{nome_cliente}}) or
+      // positional ({{1}}) variables. Named templates require parameter_name
+      // on each body parameter per Meta's Cloud API spec.
+      const variableKeys = Object.keys(payload.variables);
+      const hasNamedVars =
+        variableKeys.length > 0 &&
+        variableKeys.some((k) => !Number.isFinite(Number(k)));
 
       for (let i = 0; i < recipients.length; i += SEND_BATCH_SIZE) {
         const batch = recipients.slice(i, i + SEND_BATCH_SIZE);
 
         const apiRecipients = batch
           .filter((r) => r.contact?.phone)
-          .map((r) => ({
-            phone: r.contact!.phone as string,
-            params: r.contact
-              ? resolveVariables(
-                  payload.variables,
-                  r.contact,
-                  customValueIndex.get(r.contact.id),
-                )
-              : [],
-            ...(messageParams ? { messageParams } : {}),
-          }));
+          .map((r) => {
+            const contact = r.contact!;
+            const customValues = customValueIndex.get(contact.id);
+
+            if (hasNamedVars) {
+              const bodyNamed = resolveNamedVariables(
+                payload.variables,
+                contact,
+                customValues,
+              );
+              return {
+                phone: contact.phone as string,
+                params: [] as string[],
+                messageParams: { ...sharedMessageParams, bodyNamed },
+              };
+            }
+
+            return {
+              phone: contact.phone as string,
+              params: resolveVariables(payload.variables, contact, customValues),
+              ...(sharedMessageParams ? { messageParams: sharedMessageParams } : {}),
+            };
+          });
 
         if (apiRecipients.length === 0) continue;
 

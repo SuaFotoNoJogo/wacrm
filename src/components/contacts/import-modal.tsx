@@ -17,6 +17,11 @@ import {
   resolveImportTagIds,
   type ContactTagAssignment,
 } from '@/lib/contacts/resolve-import-tags';
+import {
+  assignImportedContactCustomValues,
+  resolveImportCustomFieldIds,
+  type ContactCustomFieldAssignment,
+} from '@/lib/contacts/resolve-import-custom-fields';
 import { cn } from '@/lib/utils';
 import { toast } from 'sonner';
 import {
@@ -131,6 +136,7 @@ export function ImportModal({
   const [parsedRows, setParsedRows] = useState<ParsedContactRow[]>([]);
   const [hasTagsColumn, setHasTagsColumn] = useState(false);
   const [hasCompanyColumn, setHasCompanyColumn] = useState(false);
+  const [customFieldNames, setCustomFieldNames] = useState<string[]>([]);
   const [tagColorByKey, setTagColorByKey] = useState<Map<string, string>>(
     new Map()
   );
@@ -140,6 +146,7 @@ export function ImportModal({
     skipped: number;
     failed: number;
     tagsAssigned: number;
+    customFieldsAssigned: number;
   } | null>(null);
 
   function reset() {
@@ -147,6 +154,7 @@ export function ImportModal({
     setParsedRows([]);
     setHasTagsColumn(false);
     setHasCompanyColumn(false);
+    setCustomFieldNames([]);
     setTagColorByKey(new Map());
     setResult(null);
     if (fileInputRef.current) fileInputRef.current.value = '';
@@ -169,6 +177,7 @@ export function ImportModal({
       rows,
       hasTagsColumn: csvHasTags,
       hasCompanyColumn: csvHasCompany,
+      customFieldNames: csvCustomFields,
     } = parseContactCsv(text);
 
     if (rows.length === 0) {
@@ -178,6 +187,7 @@ export function ImportModal({
       setParsedRows([]);
       setHasTagsColumn(false);
       setHasCompanyColumn(false);
+      setCustomFieldNames([]);
       setTagColorByKey(new Map());
       return;
     }
@@ -185,6 +195,7 @@ export function ImportModal({
     setParsedRows(rows);
     setHasTagsColumn(csvHasTags);
     setHasCompanyColumn(csvHasCompany);
+    setCustomFieldNames(csvCustomFields);
 
     if (csvHasTags && accountId) {
       const { data: tags } = await supabase
@@ -262,6 +273,22 @@ export function ImportModal({
 
       const tagAssignments: ContactTagAssignment[] = [];
 
+      // 3b) Resolve custom field names → ids. Custom fields are NOT auto-created.
+      //     Skip the round-trip when the import carries no custom fields.
+      let fieldIdByName = new Map<string, string>();
+      let skippedCustomFieldNames: string[] = [];
+      if (customFieldNames.length > 0) {
+        ({ fieldIdByName, skippedNames: skippedCustomFieldNames } = await resolveImportCustomFieldIds(
+          supabase,
+          {
+            accountId,
+            fieldNames: customFieldNames,
+          }
+        ));
+      }
+
+      const customFieldAssignments: ContactCustomFieldAssignment[] = [];
+
       // 4) Batch insert the genuinely-new rows in chunks of 50. The DB
       //    unique index is the backstop: a 23505 (race, or a format
       //    that normalizes equal) counts as skipped, not failed.
@@ -303,6 +330,16 @@ export function ImportModal({
                   tagNames: source.tagNames,
                 });
               }
+              for (const [fieldName, value] of Object.entries(source.customFieldValues)) {
+                const fieldId = fieldIdByName.get(fieldName);
+                if (fieldId) {
+                  customFieldAssignments.push({
+                    contactId: singleData.id,
+                    fieldId,
+                    value,
+                  });
+                }
+              }
             } else if (isUniqueViolation(singleErr)) {
               skipped++;
             } else {
@@ -317,11 +354,23 @@ export function ImportModal({
           // parallel inserts, zip by phone or returned id instead.
           for (let j = 0; j < inserted.length; j++) {
             const source = chunk[j];
-            if (!source || source.tagNames.length === 0) continue;
-            tagAssignments.push({
-              contactId: inserted[j].id,
-              tagNames: source.tagNames,
-            });
+            if (!source) continue;
+            if (source.tagNames.length > 0) {
+              tagAssignments.push({
+                contactId: inserted[j].id,
+                tagNames: source.tagNames,
+              });
+            }
+            for (const [fieldName, value] of Object.entries(source.customFieldValues)) {
+              const fieldId = fieldIdByName.get(fieldName);
+              if (fieldId) {
+                customFieldAssignments.push({
+                  contactId: inserted[j].id,
+                  fieldId,
+                  value,
+                });
+              }
+            }
           }
         }
       }
@@ -339,7 +388,18 @@ export function ImportModal({
         toast.warning('Contacts imported, but some tag assignments failed.');
       }
 
-      setResult({ imported, skipped, failed, tagsAssigned });
+      // 5b) Wire custom field values onto the contacts we just created.
+      let customFieldsAssigned = 0;
+      try {
+        customFieldsAssigned = await assignImportedContactCustomValues(
+          supabase,
+          customFieldAssignments
+        );
+      } catch {
+        toast.warning('Contacts imported, but some custom field assignments failed.');
+      }
+
+      setResult({ imported, skipped, failed, tagsAssigned, customFieldsAssigned });
       if (imported > 0) {
         toast.success(
           `${imported} contact${imported !== 1 ? 's' : ''} imported`
@@ -351,12 +411,25 @@ export function ImportModal({
           `${tagsAssigned} tag assignment${tagsAssigned !== 1 ? 's' : ''} applied`
         );
       }
+      if (customFieldsAssigned > 0) {
+        toast.success(
+          `${customFieldsAssigned} custom field value${customFieldsAssigned !== 1 ? 's' : ''} applied`
+        );
+      }
       if (skippedNames.length > 0) {
         const sample = skippedNames.slice(0, 3).join(', ');
         const more =
           skippedNames.length > 3 ? ` (+${skippedNames.length - 3} more)` : '';
         toast.info(
           `Unknown tags skipped (create them in Settings first): ${sample}${more}`
+        );
+      }
+      if (skippedCustomFieldNames.length > 0) {
+        const sample = skippedCustomFieldNames.slice(0, 3).join(', ');
+        const more =
+          skippedCustomFieldNames.length > 3 ? ` (+${skippedCustomFieldNames.length - 3} more)` : '';
+        toast.info(
+          `Unknown custom fields skipped (create them in Settings first): ${sample}${more}`
         );
       }
       if (skipped > 0) {
@@ -384,6 +457,10 @@ export function ImportModal({
   // avoiding an all-dash column that wastes horizontal space.
   const previewHasCompany =
     hasCompanyColumn && preview.some((row) => row.company?.trim());
+  // Custom fields: show only those with data in preview rows.
+  const previewCustomFields = customFieldNames.filter((fieldName) =>
+    preview.some((row) => row.customFieldValues[fieldName]?.trim())
+  );
 
   const tagStats = useMemo(() => {
     const names = new Set<string>();
@@ -425,7 +502,7 @@ export function ImportModal({
               <code className="rounded bg-muted px-1 py-0.5 text-[11px] text-muted-foreground">
                 tags
               </code>{' '}
-              (comma-separated; quote multi-tag cells).
+              (comma-separated; quote multi-tag cells), or any custom field names.
             </DialogDescription>
           </DialogHeader>
 
@@ -500,6 +577,12 @@ export function ImportModal({
                       {tagStats.rowsWithTags !== 1 ? 's' : ''}
                     </span>
                   )}
+                  {customFieldNames.length > 0 && (
+                    <span className="inline-flex items-center gap-1 rounded-md bg-muted/90 px-2 py-0.5 text-[11px] text-muted-foreground">
+                      {customFieldNames.length} custom field
+                      {customFieldNames.length !== 1 ? 's' : ''}
+                    </span>
+                  )}
                 </div>
               </div>
 
@@ -527,6 +610,14 @@ export function ImportModal({
                             Tags
                           </th>
                         )}
+                        {previewCustomFields.map((fieldName) => (
+                          <th
+                            key={fieldName}
+                            className="px-3 py-2 text-left font-medium whitespace-nowrap text-muted-foreground"
+                          >
+                            {fieldName}
+                          </th>
+                        ))}
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-border/70">
@@ -570,6 +661,17 @@ export function ImportModal({
                               />
                             </td>
                           )}
+                          {previewCustomFields.map((fieldName) => (
+                            <td
+                              key={fieldName}
+                              className="px-3 py-2 text-muted-foreground"
+                            >
+                              <PreviewCell
+                                value={row.customFieldValues[fieldName] || '—'}
+                                maxWidth="max-w-[8rem]"
+                              />
+                            </td>
+                          ))}
                         </tr>
                       ))}
                     </tbody>

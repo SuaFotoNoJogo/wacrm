@@ -19,6 +19,8 @@ type VariableType = 'static' | 'field' | 'custom_field';
 interface VariableMapping {
   type: VariableType;
   value: string;
+  /** Fallback used when type=field/custom_field resolves to empty for a contact. */
+  fallback?: string;
 }
 
 interface Step3Props {
@@ -127,10 +129,23 @@ export function Step3Personalize({
     };
   }, []);
 
+  // Detects both numbered ({{1}}) and named ({{nome_cliente}}) placeholders.
+  // Numbered templates are sorted numerically; named templates preserve the
+  // order of first appearance in the body (which matches Meta's positional
+  // send order).
   const placeholders = useMemo(() => {
-    const matches = template.body_text.match(/\{\{(\d+)\}\}/g);
+    const matches = template.body_text.match(/\{\{[\w]+\}\}/g);
     if (!matches) return [];
-    return [...new Set(matches)].sort();
+    const unique = [...new Set(matches)];
+    const allNumeric = unique.every((p) => /^\{\{\d+\}\}$/.test(p));
+    if (allNumeric) {
+      return unique.sort((a, b) => {
+        const an = Number(a.replace(/\D/g, ''));
+        const bn = Number(b.replace(/\D/g, ''));
+        return an - bn;
+      });
+    }
+    return unique;
   }, [template.body_text]);
 
   // Templates with an IMAGE/VIDEO/DOCUMENT header need a media URL at
@@ -325,6 +340,7 @@ export function Step3Personalize({
                         updateVariable(key, {
                           type: val as VariableType,
                           value: '',
+                          fallback: '',
                         })
                       }
                     >
@@ -401,6 +417,26 @@ export function Step3Personalize({
                     )}
                   </div>
                 </div>
+
+                {/* Fallback — shown for field/custom_field so the user can set a
+                    default when a contact doesn't have that field populated.
+                    Contacts with no value AND no fallback will be skipped. */}
+                {(mapping.type === 'field' || mapping.type === 'custom_field') && mapping.value && (
+                  <div className="mt-2 grid grid-cols-1 gap-1">
+                    <label className="text-xs font-medium text-muted-foreground">
+                      Valor padrão{' '}
+                      <span className="font-normal text-muted-foreground/70">
+                        (usado quando o campo estiver vazio para um contato)
+                      </span>
+                    </label>
+                    <Input
+                      value={mapping.fallback ?? ''}
+                      onChange={(e) => updateVariable(key, { fallback: e.target.value })}
+                      placeholder="Deixe vazio para pular contatos sem esse campo..."
+                      className="border-border bg-muted text-foreground placeholder:text-muted-foreground text-xs"
+                    />
+                  </div>
+                )}
               </div>
             );
           })}

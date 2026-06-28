@@ -4,6 +4,7 @@ import { useEffect, useState, useCallback } from 'react';
 import { createClient } from '@/lib/supabase/client';
 import { CustomField, Tag } from '@/types';
 import { Button } from '@/components/ui/button';
+import { CsvUploadModal } from './csv-upload-modal';
 import {
   Users,
   Tags,
@@ -22,6 +23,26 @@ interface CustomFieldFilter {
   fieldId: string;
   operator: CustomFieldOperator;
   value: string;
+}
+
+// Standard contact fields that live in the contacts table (not contact_custom_values).
+// IDs are prefixed with "__contact_" to distinguish from custom field UUIDs.
+const CONTACT_FIELDS = [
+  { id: '__contact_name',    label: 'Name' },
+  { id: '__contact_email',   label: 'Email' },
+  { id: '__contact_phone',   label: 'Phone' },
+  { id: '__contact_company', label: 'Company' },
+];
+
+function isContactField(fieldId: string) {
+  return fieldId.startsWith('__contact_');
+}
+
+// For phone, search phone_normalized (digits only — strips +, spaces, dashes)
+// so the user can type "5511" and match "+55 11 9..." or "5511971...".
+function contactColumn(fieldId: string): string {
+  const col = fieldId.replace('__contact_', '');
+  return col === 'phone' ? 'phone_normalized' : col;
 }
 
 interface AudienceConfig {
@@ -89,6 +110,7 @@ export function Step2SelectAudience({
   const [loadingFields, setLoadingFields] = useState(false);
   const [estimatedCount, setEstimatedCount] = useState<number | null>(null);
   const [loadingCount, setLoadingCount] = useState(false);
+  const [csvUploadOpen, setCsvUploadOpen] = useState(false);
 
   // Tags are used both by the primary "Filter by Tags" audience type
   // AND by the exclude-list below — so always load once on mount.
@@ -151,15 +173,28 @@ export function Step2SelectAudience({
         audience.customField.value
       ) {
         const { fieldId, operator, value } = audience.customField;
-        let q = supabase
-          .from('contact_custom_values')
-          .select('contact_id')
-          .eq('custom_field_id', fieldId);
-        if (operator === 'is') q = q.eq('value', value);
-        else if (operator === 'is_not') q = q.neq('value', value);
-        else q = q.ilike('value', `%${value}%`);
-        const { data } = await q;
-        baseIds = new Set((data ?? []).map((r) => r.contact_id));
+
+        if (isContactField(fieldId)) {
+          // Standard contact field — query the contacts table directly.
+          const col = contactColumn(fieldId);
+          let q = supabase.from('contacts').select('id');
+          if (operator === 'is') q = q.eq(col, value);
+          else if (operator === 'is_not') q = q.neq(col, value);
+          else q = q.ilike(col, `%${value}%`);
+          const { data } = await q;
+          baseIds = new Set((data ?? []).map((r) => r.id));
+        } else {
+          // Custom field — query contact_custom_values.
+          let q = supabase
+            .from('contact_custom_values')
+            .select('contact_id')
+            .eq('custom_field_id', fieldId);
+          if (operator === 'is') q = q.eq('value', value);
+          else if (operator === 'is_not') q = q.neq('value', value);
+          else q = q.ilike('value', `%${value}%`);
+          const { data } = await q;
+          baseIds = new Set((data ?? []).map((r) => r.contact_id));
+        }
       } else if (
         audience.type === 'csv' &&
         audience.csvContacts &&
@@ -234,6 +269,10 @@ export function Step2SelectAudience({
       value: '',
     };
     onUpdate({ ...audience, customField: { ...prev, ...patch } });
+  }
+
+  function handleCsvUpload(contacts: { phone: string; name?: string }[]) {
+    onUpdate({ ...audience, csvContacts: contacts });
   }
 
   const isValid =
@@ -356,11 +395,22 @@ export function Step2SelectAudience({
                 className="h-9 rounded-lg border border-border bg-muted px-2.5 text-sm text-foreground outline-none focus:border-primary focus:ring-1 focus:ring-primary"
               >
                 <option value="">Select field…</option>
-                {customFields.map((f) => (
-                  <option key={f.id} value={f.id}>
-                    {f.field_name}
-                  </option>
-                ))}
+                <optgroup label="Contact Fields">
+                  {CONTACT_FIELDS.map((f) => (
+                    <option key={f.id} value={f.id}>
+                      {f.label}
+                    </option>
+                  ))}
+                </optgroup>
+                {customFields.length > 0 && (
+                  <optgroup label="Custom Fields">
+                    {customFields.map((f) => (
+                      <option key={f.id} value={f.id}>
+                        {f.field_name}
+                      </option>
+                    ))}
+                  </optgroup>
+                )}
               </select>
               <select
                 value={audience.customField?.operator ?? 'is'}
@@ -386,6 +436,41 @@ export function Step2SelectAudience({
               />
             </div>
           )}
+        </div>
+      )}
+
+      {audience.type === 'csv' && (
+        <div className="rounded-xl border border-border bg-card/50 p-4">
+          <div className="space-y-3">
+            <p className="text-sm font-medium text-foreground">Upload CSV File</p>
+            {audience.csvContacts && audience.csvContacts.length > 0 ? (
+              <>
+                <div className="flex items-center gap-2 rounded-lg bg-primary/5 px-3 py-2">
+                  <div className="h-2 w-2 rounded-full bg-primary" />
+                  <span className="text-sm text-foreground">
+                    {audience.csvContacts.length} contact
+                    {audience.csvContacts.length !== 1 ? 's' : ''} loaded
+                  </span>
+                </div>
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => setCsvUploadOpen(true)}
+                  className="w-full border-border text-muted-foreground hover:bg-muted"
+                >
+                  Replace File
+                </Button>
+              </>
+            ) : (
+              <Button
+                type="button"
+                onClick={() => setCsvUploadOpen(true)}
+                className="w-full bg-primary hover:bg-primary/90 text-primary-foreground"
+              >
+                Choose CSV File
+              </Button>
+            )}
+          </div>
         </div>
       )}
 
@@ -467,6 +552,12 @@ export function Step2SelectAudience({
           <ArrowRight className="h-4 w-4" />
         </Button>
       </div>
+
+      <CsvUploadModal
+        open={csvUploadOpen}
+        onOpenChange={setCsvUploadOpen}
+        onUpload={handleCsvUpload}
+      />
     </div>
   );
 }

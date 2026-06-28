@@ -19,7 +19,13 @@ import { ArrowLeft, Send, Loader2, Users, Save } from 'lucide-react';
 interface AudienceConfig {
   type: string;
   tagIds?: string[];
+  customField?: {
+    fieldId: string;
+    operator: 'is' | 'is_not' | 'contains';
+    value: string;
+  };
   csvContacts?: { phone: string; name?: string }[];
+  excludeTagIds?: string[];
 }
 
 interface Step4Props {
@@ -55,23 +61,72 @@ export function Step4ScheduleSend({
       try {
         const supabase = createClient();
 
+        let baseIds: Set<string> | null = null; // null = "all contacts"
+
         if (audience.type === 'all') {
-          const { count } = await supabase
-            .from('contacts')
-            .select('*', { count: 'exact', head: true });
-          setEstimatedReach(count ?? 0);
+          // handled below with full count
         } else if (audience.type === 'tags' && audience.tagIds && audience.tagIds.length > 0) {
           const { data: contactTags } = await supabase
             .from('contact_tags')
             .select('contact_id')
             .in('tag_id', audience.tagIds);
-
-          const uniqueIds = new Set((contactTags ?? []).map((ct) => ct.contact_id));
-          setEstimatedReach(uniqueIds.size);
+          baseIds = new Set((contactTags ?? []).map((ct) => ct.contact_id));
+        } else if (
+          audience.type === 'custom_field' &&
+          audience.customField?.fieldId &&
+          audience.customField.value
+        ) {
+          const { fieldId, operator, value } = audience.customField;
+          if (fieldId.startsWith('__contact_')) {
+            const rawCol = fieldId.replace('__contact_', '');
+            const col = rawCol === 'phone' ? 'phone_normalized' : rawCol;
+            let q = supabase.from('contacts').select('id');
+            if (operator === 'is') q = q.eq(col, value);
+            else if (operator === 'is_not') q = q.neq(col, value);
+            else q = q.ilike(col, `%${value}%`);
+            const { data } = await q;
+            baseIds = new Set((data ?? []).map((r) => r.id));
+          } else {
+            let q = supabase
+              .from('contact_custom_values')
+              .select('contact_id')
+              .eq('custom_field_id', fieldId);
+            if (operator === 'is') q = q.eq('value', value);
+            else if (operator === 'is_not') q = q.neq('value', value);
+            else q = q.ilike('value', `%${value}%`);
+            const { data } = await q;
+            baseIds = new Set((data ?? []).map((r) => r.contact_id));
+          }
         } else if (audience.type === 'csv' && audience.csvContacts) {
           setEstimatedReach(audience.csvContacts.length);
+          return;
         } else {
           setEstimatedReach(0);
+          return;
+        }
+
+        // Apply exclude tags
+        let excludeSet: Set<string> | null = null;
+        if (audience.excludeTagIds && audience.excludeTagIds.length > 0) {
+          const { data: excludeRows } = await supabase
+            .from('contact_tags')
+            .select('contact_id')
+            .in('tag_id', audience.excludeTagIds);
+          excludeSet = new Set((excludeRows ?? []).map((r) => r.contact_id));
+        }
+
+        if (baseIds) {
+          const effective = excludeSet
+            ? [...baseIds].filter((id) => !excludeSet!.has(id)).length
+            : baseIds.size;
+          setEstimatedReach(effective);
+        } else {
+          // 'all' type
+          const { count } = await supabase
+            .from('contacts')
+            .select('*', { count: 'exact', head: true });
+          const total = count ?? 0;
+          setEstimatedReach(excludeSet ? Math.max(0, total - excludeSet.size) : total);
         }
       } finally {
         setLoadingReach(false);
@@ -87,8 +142,10 @@ export function Step4ScheduleSend({
       : audience.type === 'tags'
         ? `Tags (${audience.tagIds?.length ?? 0} selected)`
         : audience.type === 'csv'
-          ? 'CSV Upload'
-          : 'Custom';
+          ? `CSV (${audience.csvContacts?.length ?? 0} contacts)`
+          : audience.type === 'custom_field'
+            ? 'Custom Field Filter'
+            : 'Custom';
 
   return (
     <div className="space-y-6">

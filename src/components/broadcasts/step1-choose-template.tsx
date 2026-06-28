@@ -105,11 +105,13 @@ export function Step1ChooseTemplate({ selectedTemplate, onSelect, onNext, onBack
                   </span>
                 </div>
                 <p className="line-clamp-3 text-xs text-muted-foreground">{template.body_text}</p>
-                <div className="flex items-center gap-2 text-[10px] text-muted-foreground">
-                  <span>{template.language ?? 'en_US'}</span>
-                  {/* Status is omitted on purpose — every template
-                      shown here is already filtered to APPROVED,
-                      so the chip carried no information. */}
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[10px] text-muted-foreground">{template.language ?? 'en_US'}</span>
+                  {template.meta_template_id && (
+                    <span className="rounded bg-muted px-1.5 py-0.5 text-[9px] font-mono text-muted-foreground" title={`Template ID: ${template.meta_template_id}`}>
+                      ID: {template.meta_template_id.slice(0, 8)}…
+                    </span>
+                  )}
                 </div>
               </button>
             );

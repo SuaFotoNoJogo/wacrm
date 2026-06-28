@@ -36,6 +36,13 @@ import { extractVariableIndices } from './template-validators';
 export interface SendTimeParams {
   /** Values for body {{1}}, {{2}}, … indexed by variable position. */
   body?: string[];
+  /**
+   * Named body parameters for templates that use {{variable_name}} format.
+   * When set, takes precedence over `body`. Each entry maps a variable name
+   * to its resolved value; the API receives `parameter_name` on each param
+   * as required by Meta's Cloud API for NAMED-format templates.
+   */
+  bodyNamed?: { value: string; paramName: string }[];
   /** Value for TEXT-header {{1}}, when the header has a variable. */
   headerText?: string;
   /** Override the template's static media URL for this send. */
@@ -62,7 +69,7 @@ export type MetaSendComponent =
     };
 
 type MetaSendParameter =
-  | { type: 'text'; text: string }
+  | { type: 'text'; text: string; parameter_name?: string }
   | { type: 'image'; image: { link?: string; id?: string } }
   | { type: 'video'; video: { link?: string; id?: string } }
   | { type: 'document'; document: { link?: string; id?: string } }
@@ -127,16 +134,40 @@ function buildBodyComponent(
   template: MessageTemplate,
   params: SendTimeParams,
 ): MetaSendComponent | null {
+  // Named-format templates: Meta Cloud API requires parameter_name on each
+  // parameter. bodyNamed takes precedence over body when present.
+  if (params.bodyNamed && params.bodyNamed.length > 0) {
+    // Meta rejects (#131008) when any text parameter is empty. Catch it
+    // here with an actionable message instead of a cryptic API error.
+    const emptyParam = params.bodyNamed.find(({ value }) => !String(value).trim());
+    if (emptyParam) {
+      throw new Error(
+        `A variável "{{${emptyParam.paramName}}}" não tem valor para este contato. ` +
+        `Verifique o mapeamento no passo de personalização ou certifique-se de que o campo está preenchido.`,
+      );
+    }
+    return {
+      type: 'body',
+      parameters: params.bodyNamed.map(({ value, paramName }) => ({
+        type: 'text',
+        text: String(value),
+        parameter_name: paramName,
+      })),
+    };
+  }
+
+  // Positional-format templates: only {{1}}, {{2}} etc. are substitution
+  // points. If the template has no numbered variables, skip the component
+  // entirely — sending an empty or unexpected body component causes
+  // (#100) Invalid parameter from Meta.
   const varCount = extractVariableIndices(template.body_text).length;
+  if (varCount === 0) return null;
   const body = params.body ?? [];
-  if (varCount === 0 && body.length === 0) return null;
   if (body.length < varCount) {
     throw new Error(
       `Body has ${varCount} variable(s) but only ${body.length} value(s) were supplied.`,
     );
   }
-  // Trim to the variable count — extra values are dropped silently so
-  // a legacy caller that passes too many doesn't error out.
   const values = body.slice(0, varCount);
   return {
     type: 'body',

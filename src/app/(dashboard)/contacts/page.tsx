@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { createClient } from '@/lib/supabase/client';
 import { toast } from 'sonner';
-import type { Contact, Tag, ContactTag } from '@/types';
+import type { Contact, CustomField, Tag, ContactTag } from '@/types';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import {
@@ -61,6 +61,7 @@ const PAGE_SIZE = 25;
 
 interface ContactWithTags extends Contact {
   tags?: Tag[];
+  customFieldValues?: { fieldId: string; fieldName: string; value: string }[];
 }
 
 export default function ContactsPage() {
@@ -94,6 +95,7 @@ export default function ContactsPage() {
 
   // All tags for display
   const [tagsMap, setTagsMap] = useState<Record<string, Tag>>({});
+  const [customFieldDefs, setCustomFieldDefs] = useState<CustomField[]>([]);
 
   // Guards against out-of-order fetch responses: each fetchContacts run
   // claims a sequence number and only the latest is allowed to commit its
@@ -114,6 +116,11 @@ export default function ContactsPage() {
         return pruned.length === prev.length ? prev : pruned;
       });
     }
+  }, [supabase]);
+
+  const fetchCustomFieldDefs = useCallback(async () => {
+    const { data } = await supabase.from('custom_fields').select('*').order('field_name');
+    if (data) setCustomFieldDefs(data);
   }, [supabase]);
 
   const fetchContacts = useCallback(async () => {
@@ -182,12 +189,15 @@ export default function ContactsPage() {
       return;
     }
 
-    // Fetch tags for these contacts
+    // Fetch tags and custom field values for these contacts in parallel
     const contactIds = contactRows.map((c) => c.id);
-    const { data: contactTags } = await supabase
-      .from('contact_tags')
-      .select('contact_id, tag_id')
-      .in('contact_id', contactIds);
+    const [{ data: contactTags }, { data: customVals }] = await Promise.all([
+      supabase.from('contact_tags').select('contact_id, tag_id').in('contact_id', contactIds),
+      supabase
+        .from('contact_custom_values')
+        .select('contact_id, custom_field_id, value')
+        .in('contact_id', contactIds),
+    ]);
     if (seq !== fetchSeq.current) return; // superseded by a newer fetch
 
     const tagsByContact: Record<string, string[]> = {};
@@ -196,16 +206,27 @@ export default function ContactsPage() {
       tagsByContact[ct.contact_id].push(ct.tag_id);
     });
 
+    const customByContact: Record<string, { fieldId: string; fieldName: string; value: string }[]> = {};
+    for (const row of customVals ?? []) {
+      if (!row.value) continue;
+      if (!customByContact[row.contact_id]) customByContact[row.contact_id] = [];
+      const def = customFieldDefs.find((f) => f.id === row.custom_field_id);
+      customByContact[row.contact_id].push({
+        fieldId: row.custom_field_id,
+        fieldName: def?.field_name ?? row.custom_field_id,
+        value: row.value,
+      });
+    }
+
     const enriched: ContactWithTags[] = contactRows.map((c) => ({
       ...c,
-      tags: (tagsByContact[c.id] ?? [])
-        .map((tid) => tagsMap[tid])
-        .filter(Boolean),
+      tags: (tagsByContact[c.id] ?? []).map((tid) => tagsMap[tid]).filter(Boolean),
+      customFieldValues: customByContact[c.id] ?? [],
     }));
 
     setContacts(enriched);
     setLoading(false);
-  }, [supabase, page, search, selectedTagIds, tagsMap]);
+  }, [supabase, page, search, selectedTagIds, tagsMap, customFieldDefs]);
 
   // Load-once-on-mount-ish data fetches. Each setter inside runs
   // inside an async promise completion (Supabase await), not
@@ -214,7 +235,8 @@ export default function ContactsPage() {
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     fetchTags();
-  }, [fetchTags]);
+    fetchCustomFieldDefs();
+  }, [fetchTags, fetchCustomFieldDefs]);
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -545,6 +567,9 @@ export default function ContactsPage() {
               <TableHead className="text-muted-foreground hidden md:table-cell">Email</TableHead>
               <TableHead className="text-muted-foreground hidden lg:table-cell">Company</TableHead>
               <TableHead className="text-muted-foreground hidden md:table-cell">Tags</TableHead>
+              {customFieldDefs.length > 0 && (
+                <TableHead className="text-muted-foreground hidden xl:table-cell">Fields</TableHead>
+              )}
               <TableHead className="text-muted-foreground hidden lg:table-cell">Created</TableHead>
               <TableHead className="text-muted-foreground w-12" />
             </TableRow>
@@ -552,7 +577,7 @@ export default function ContactsPage() {
           <TableBody>
             {loading ? (
               <TableRow className="border-border">
-                <TableCell colSpan={8} className="text-center py-12">
+                <TableCell colSpan={customFieldDefs.length > 0 ? 9 : 8} className="text-center py-12">
                   <div className="flex flex-col items-center gap-2">
                     <Loader2 className="size-6 animate-spin text-primary" />
                     <p className="text-sm text-muted-foreground">Loading contacts...</p>
@@ -561,7 +586,7 @@ export default function ContactsPage() {
               </TableRow>
             ) : contacts.length === 0 ? (
               <TableRow className="border-border">
-                <TableCell colSpan={8} className="text-center py-12">
+                <TableCell colSpan={customFieldDefs.length > 0 ? 9 : 8} className="text-center py-12">
                   <div className="flex flex-col items-center gap-2">
                     <Users className="size-8 text-muted-foreground" />
                     <p className="text-sm text-muted-foreground">
@@ -634,6 +659,32 @@ export default function ContactsPage() {
                       )}
                     </div>
                   </TableCell>
+                  {customFieldDefs.length > 0 && (
+                    <TableCell className="hidden xl:table-cell">
+                      <div className="flex flex-wrap gap-1">
+                        {contact.customFieldValues && contact.customFieldValues.length > 0 ? (
+                          <>
+                            {contact.customFieldValues.slice(0, 2).map(({ fieldId, fieldName, value }) => (
+                              <span
+                                key={fieldId}
+                                className="inline-flex items-center gap-1 rounded-md bg-muted px-1.5 py-0.5 text-[10px]"
+                              >
+                                <span className="text-muted-foreground">{fieldName}:</span>
+                                <span className="text-foreground truncate max-w-[80px]">{value}</span>
+                              </span>
+                            ))}
+                            {contact.customFieldValues.length > 2 && (
+                              <span className="text-[10px] text-muted-foreground">
+                                +{contact.customFieldValues.length - 2}
+                              </span>
+                            )}
+                          </>
+                        ) : (
+                          <span className="text-muted-foreground text-xs">-</span>
+                        )}
+                      </div>
+                    </TableCell>
+                  )}
                   <TableCell className="text-muted-foreground text-xs hidden lg:table-cell">
                     {new Date(contact.created_at).toLocaleDateString('en-US', {
                       month: 'short',
