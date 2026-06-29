@@ -30,6 +30,9 @@ import {
   Loader2,
   ArrowDown,
   ArrowUp,
+  ExternalLink,
+  MousePointerClick,
+  Phone,
 } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
@@ -90,6 +93,7 @@ interface StepMeta {
 const STEP_META: Record<AutomationStepType, StepMeta> = {
   send_message: { label: "Send Message", icon: MessageSquare, border: "border-l-primary" },
   send_template: { label: "Send Template", icon: FileText, border: "border-l-primary" },
+  send_interactive: { label: "Message with Buttons", icon: MousePointerClick, border: "border-l-primary" },
   add_tag: { label: "Add Tag", icon: Tag, border: "border-l-primary" },
   remove_tag: { label: "Remove Tag", icon: TagIcon, border: "border-l-primary" },
   assign_conversation: { label: "Assign Conversation", icon: UserCheck, border: "border-l-primary" },
@@ -104,6 +108,7 @@ const STEP_META: Record<AutomationStepType, StepMeta> = {
 const ADDABLE_STEPS: AutomationStepType[] = [
   "send_message",
   "send_template",
+  "send_interactive",
   "add_tag",
   "remove_tag",
   "assign_conversation",
@@ -144,6 +149,8 @@ function blankConfig(type: AutomationStepType): Record<string, unknown> {
       return { text: "" }
     case "send_template":
       return { template_name: "", language: "en_US" }
+    case "send_interactive":
+      return { text: "", buttons: [{ title: "" }] }
     case "add_tag":
     case "remove_tag":
       return { tag_id: "" }
@@ -382,19 +389,47 @@ function AgentSelect({
   )
 }
 
-/** Template dropdown showing approved templates by name + language,
- *  storing both template_name and language. Falls back to manual name +
- *  language inputs when no approved templates are synced yet. */
+/** Template dropdown showing approved templates by name + language.
+ *  When a template is selected, shows body preview, variable inputs,
+ *  and a button list so the author can confirm which buttons will be sent. */
 function SendTemplateFields({
   templateName,
   language,
+  variables,
   onChange,
 }: {
   templateName: string
   language: string
-  onChange: (patch: { template_name: string; language: string }) => void
+  variables?: Record<string, string>
+  onChange: (patch: {
+    template_name: string
+    language: string
+    variables?: Record<string, string>
+  }) => void
 }) {
   const { templates } = useResources()
+
+  // Encode name + language in the option value so two templates that
+  // share a name across languages stay distinct.
+  const toValue = (name: string, lang: string) => `${name}::${lang}`
+  const current = templateName ? toValue(templateName, language) : ""
+
+  const selected = templates.find(
+    (t) => toValue(t.name, t.language ?? "en_US") === current,
+  )
+
+  // Extract all {{N}} or {{name}} placeholders from the body in order.
+  const bodyPlaceholders: string[] = selected?.body_text
+    ? [...new Set(selected.body_text.match(/\{\{[\w]+\}\}/g) ?? [])]
+    : []
+
+  function updateVar(key: string, val: string) {
+    onChange({
+      template_name: templateName,
+      language,
+      variables: { ...(variables ?? {}), [key]: val },
+    })
+  }
 
   if (templates.length === 0) {
     return (
@@ -403,7 +438,7 @@ function SendTemplateFields({
           <Input
             value={templateName}
             onChange={(e) =>
-              onChange({ template_name: e.target.value, language })
+              onChange({ template_name: e.target.value, language, variables })
             }
             className="bg-muted text-foreground"
           />
@@ -412,7 +447,7 @@ function SendTemplateFields({
           <Input
             value={language}
             onChange={(e) =>
-              onChange({ template_name: templateName, language: e.target.value })
+              onChange({ template_name: templateName, language: e.target.value, variables })
             }
             className="bg-muted text-foreground"
           />
@@ -421,40 +456,244 @@ function SendTemplateFields({
     )
   }
 
-  // Encode name + language in the option value so two templates that
-  // share a name across languages stay distinct.
-  const toValue = (name: string, lang: string) => `${name}::${lang}`
-  const current = templateName ? toValue(templateName, language) : ""
   const hasMatch = templates.some(
     (t) => toValue(t.name, t.language ?? "en_US") === current,
   )
 
   return (
-    <FieldBlock label="Template">
-      <select
-        value={current}
-        onChange={(e) => {
-          const [name, lang] = e.target.value.split("::")
-          onChange({ template_name: name ?? "", language: lang ?? "" })
-        }}
-        className={SELECT_CLASS}
-      >
-        <option value="">Select a template…</option>
-        {templates.map((t) => {
-          const lang = t.language ?? "en_US"
-          return (
-            <option key={t.id} value={toValue(t.name, lang)}>
-              {t.name} ({lang})
+    <>
+      <FieldBlock label="Template">
+        <select
+          value={current}
+          onChange={(e) => {
+            const [name, lang] = e.target.value.split("::")
+            onChange({ template_name: name ?? "", language: lang ?? "", variables: {} })
+          }}
+          className={SELECT_CLASS}
+        >
+          <option value="">Select a template…</option>
+          {templates.map((t) => {
+            const lang = t.language ?? "en_US"
+            const btns = t.buttons ?? []
+            const hasCta = btns.some((b) => b.type === "URL" || b.type === "PHONE_NUMBER")
+            return (
+              <option key={t.id} value={toValue(t.name, lang)}>
+                {t.name} ({lang}){hasCta ? " 🔗" : ""}
+              </option>
+            )
+          })}
+          {current && !hasMatch && (
+            <option value={current}>
+              {templateName} ({language || "unknown"}) — not in approved list
             </option>
-          )
-        })}
-        {current && !hasMatch && (
-          <option value={current}>
-            {templateName} ({language || "unknown"}) — not in approved list
-          </option>
+          )}
+        </select>
+      </FieldBlock>
+
+      {selected && (
+        <>
+          {/* Body preview */}
+          <FieldBlock label="Preview">
+            <div className="rounded-md bg-[#0e1a12] p-2.5">
+              <p className="whitespace-pre-wrap text-xs text-primary/90 leading-relaxed">
+                {selected.body_text}
+              </p>
+              {selected.footer_text && (
+                <p className="mt-1 text-[10px] text-muted-foreground">{selected.footer_text}</p>
+              )}
+            </div>
+          </FieldBlock>
+
+          {/* Variable inputs */}
+          {bodyPlaceholders.length > 0 && (
+            <FieldBlock label="Variáveis">
+              <div className="space-y-2">
+                {bodyPlaceholders.map((placeholder) => {
+                  const key = placeholder.replace(/^\{\{|\}\}$/g, "")
+                  return (
+                    <div key={key}>
+                      <label className="mb-0.5 block text-[10px] text-muted-foreground font-mono">
+                        {placeholder}
+                      </label>
+                      <Input
+                        value={variables?.[key] ?? ""}
+                        onChange={(e) => updateVar(key, e.target.value)}
+                        placeholder={`Valor fixo ou {{ contact.name }}, {{ contact.phone }}…`}
+                        className="bg-muted text-foreground text-xs h-7"
+                      />
+                    </div>
+                  )
+                })}
+                <p className="text-[10px] text-muted-foreground">
+                  Use <code className="text-primary">{"{{ contact.name }}"}</code>,{" "}
+                  <code className="text-primary">{"{{ contact.phone }}"}</code>,{" "}
+                  <code className="text-primary">{"{{ contact.email }}"}</code> para dados do contato.
+                </p>
+              </div>
+            </FieldBlock>
+          )}
+
+          {/* Buttons preview */}
+          {(selected.buttons ?? []).length > 0 && (
+            <FieldBlock label="Botões incluídos">
+              <div className="space-y-1">
+                {(selected.buttons ?? []).map((btn, i) => (
+                  <div
+                    key={i}
+                    className="flex items-center gap-2 rounded-md border border-border bg-muted px-2.5 py-1.5 text-xs"
+                  >
+                    {btn.type === "URL" ? (
+                      <ExternalLink className="h-3 w-3 shrink-0 text-blue-400" />
+                    ) : btn.type === "PHONE_NUMBER" ? (
+                      <Phone className="h-3 w-3 shrink-0 text-green-400" />
+                    ) : (
+                      <MousePointerClick className="h-3 w-3 shrink-0 text-primary" />
+                    )}
+                    <span className="text-foreground font-medium">{btn.text}</span>
+                    {btn.type === "URL" && (
+                      <span className="ml-auto text-[10px] text-muted-foreground truncate max-w-[120px]">
+                        {btn.url}
+                      </span>
+                    )}
+                    {btn.type === "PHONE_NUMBER" && (
+                      <span className="ml-auto text-[10px] text-muted-foreground">
+                        {btn.phone_number}
+                      </span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </FieldBlock>
+          )}
+        </>
+      )}
+    </>
+  )
+}
+
+/** Message with quick-reply buttons (interactive message).
+ *  Works within the 24-hour conversation window — no template approval needed.
+ *  Buttons are tappable labels; when tapped the recipient's button text is sent
+ *  back as a message and can trigger keyword-match automations. */
+function SendInteractiveFields({
+  text,
+  header,
+  footer,
+  buttons,
+  onChange,
+}: {
+  text: string
+  header: string
+  footer: string
+  buttons: { title: string; id?: string; url?: string }[]
+  onChange: (patch: Record<string, unknown>) => void
+}) {
+  const MAX_BUTTONS = 3
+  const hasUrlButton = buttons.some((b) => b.url)
+
+  function updateButton(index: number, patch: Partial<{ title: string; url: string | undefined }>) {
+    const next = buttons.map((b, i) => (i === index ? { ...b, ...patch } : b))
+    onChange({ text, header, footer, buttons: next })
+  }
+
+  function addButton() {
+    if (buttons.length >= MAX_BUTTONS) return
+    onChange({ text, header, footer, buttons: [...buttons, { title: "" }] })
+  }
+
+  function removeButton(index: number) {
+    onChange({ text, header, footer, buttons: buttons.filter((_, i) => i !== index) })
+  }
+
+  return (
+    <>
+      <FieldBlock label="Message text">
+        <Textarea
+          value={text}
+          onChange={(e) => onChange({ text: e.target.value, header, footer, buttons })}
+          placeholder={"Olá! Como posso ajudar?\n\nUse {{ contact.name }} para personalizar."}
+          className="min-h-24 bg-muted text-foreground"
+        />
+      </FieldBlock>
+
+      <FieldBlock label="Header (optional)">
+        <Input
+          value={header}
+          onChange={(e) => onChange({ text, header: e.target.value, footer, buttons })}
+          placeholder="Título curto (máx. 60 caracteres)"
+          maxLength={60}
+          className="bg-muted text-foreground"
+        />
+      </FieldBlock>
+
+      <FieldBlock label="Footer (optional)">
+        <Input
+          value={footer}
+          onChange={(e) => onChange({ text, header, footer: e.target.value, buttons })}
+          placeholder="Nota de rodapé (máx. 60 caracteres)"
+          maxLength={60}
+          className="bg-muted text-foreground"
+        />
+      </FieldBlock>
+
+      <FieldBlock label={`Buttons (${buttons.length}/${MAX_BUTTONS})`}>
+        <div className="space-y-3">
+          {buttons.map((btn, i) => (
+            <div key={i} className="space-y-1">
+              <div className="flex items-center gap-1.5">
+                <Input
+                  value={btn.title}
+                  onChange={(e) => updateButton(i, { title: e.target.value })}
+                  placeholder="Texto do botão (máx. 20 chars)"
+                  maxLength={20}
+                  className="bg-muted text-foreground text-sm"
+                />
+                {buttons.length > 1 && (
+                  <button
+                    type="button"
+                    onClick={() => removeButton(i)}
+                    className="shrink-0 text-muted-foreground hover:text-destructive"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </button>
+                )}
+              </div>
+              {/* URL field: enabled only for the button that already has a URL,
+                  or for any button when no other button has a URL yet. */}
+              <div className="flex items-center gap-1.5">
+                <ExternalLink className="h-3 w-3 shrink-0 text-muted-foreground" />
+                <Input
+                  value={btn.url ?? ""}
+                  onChange={(e) => updateButton(i, { url: e.target.value || undefined })}
+                  placeholder="URL do botão (opcional, ex: https://…)"
+                  className="bg-muted text-foreground text-xs h-7"
+                  disabled={hasUrlButton && !btn.url}
+                />
+              </div>
+            </div>
+          ))}
+          {buttons.length < MAX_BUTTONS && !hasUrlButton && (
+            <button
+              type="button"
+              onClick={addButton}
+              className="flex items-center gap-1 text-xs text-primary hover:text-primary/80"
+            >
+              <Plus className="h-3 w-3" />
+              Add button
+            </button>
+          )}
+        </div>
+        {hasUrlButton ? (
+          <p className="mt-1.5 text-[10px] text-muted-foreground">
+            Botão com URL abre o link no navegador do contato. Apenas um botão com URL por mensagem.
+          </p>
+        ) : (
+          <p className="mt-1.5 text-[10px] text-muted-foreground">
+            Botões sem URL enviam o texto de volta como mensagem e podem acionar automações de <strong>Keyword Match</strong>.
+          </p>
         )}
-      </select>
-    </FieldBlock>
+      </FieldBlock>
+    </>
   )
 }
 
@@ -1067,6 +1306,17 @@ function StepEditor({
         <SendTemplateFields
           templateName={(cfg.template_name as string) ?? ""}
           language={(cfg.language as string) ?? ""}
+          variables={(cfg.variables as Record<string, string> | undefined) ?? {}}
+          onChange={(patch) => set(patch)}
+        />
+      )
+    case "send_interactive":
+      return (
+        <SendInteractiveFields
+          text={(cfg.text as string) ?? ""}
+          header={(cfg.header as string | undefined) ?? ""}
+          footer={(cfg.footer as string | undefined) ?? ""}
+          buttons={(cfg.buttons as { title: string; id?: string }[]) ?? [{ title: "" }]}
           onChange={(patch) => set(patch)}
         />
       )
@@ -1274,6 +1524,11 @@ function previewFor(step: BuilderStep): string {
       return (step.step_config.text as string) || "no text yet"
     case "send_template":
       return (step.step_config.template_name as string) || "pick a template"
+    case "send_interactive": {
+      const btns = (step.step_config.buttons as { title: string }[] | undefined) ?? []
+      const labels = btns.map((b) => b.title).filter(Boolean).join(" / ")
+      return labels ? `[${labels}] ${(step.step_config.text as string) || ""}`.trim() : ((step.step_config.text as string) || "no text yet")
+    }
     case "wait":
       return `${step.step_config.amount ?? "?"} ${step.step_config.unit ?? ""}`
     case "condition":

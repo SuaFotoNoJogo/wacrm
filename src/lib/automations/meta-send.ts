@@ -1,4 +1,4 @@
-import { sendTextMessage, sendTemplateMessage } from '@/lib/whatsapp/meta-api'
+import { sendTextMessage, sendTemplateMessage, sendInteractiveButtons, sendCtaUrl } from '@/lib/whatsapp/meta-api'
 import { decrypt } from '@/lib/whatsapp/encryption'
 import {
   sanitizePhoneForMeta,
@@ -6,6 +6,7 @@ import {
   phoneVariants,
   isRecipientNotAllowedError,
 } from '@/lib/whatsapp/phone-utils'
+import type { MessageTemplate } from '@/types'
 import { supabaseAdmin } from './admin-client'
 
 // ------------------------------------------------------------
@@ -41,6 +42,9 @@ interface SendTemplateArgs {
   templateName: string
   language?: string
   params?: string[]
+  /** When provided, the full components array (header + body + buttons) is
+   *  built from the template row — required for URL buttons and media headers. */
+  template?: MessageTemplate
 }
 
 export async function engineSendText(args: SendTextArgs): Promise<{ whatsapp_message_id: string }> {
@@ -53,9 +57,28 @@ export async function engineSendTemplate(
   return sendViaMeta({ ...args, kind: 'template' })
 }
 
+
 type SendInput =
   | (SendTextArgs & { kind: 'text' })
   | (SendTemplateArgs & { kind: 'template' })
+  | (SendInteractiveArgs & { kind: 'interactive' })
+
+interface SendInteractiveArgs {
+  accountId: string
+  userId: string
+  conversationId: string
+  contactId: string
+  text: string
+  header?: string
+  footer?: string
+  buttons: { title: string; id?: string; url?: string }[]
+}
+
+export async function engineSendInteractive(
+  args: SendInteractiveArgs,
+): Promise<{ whatsapp_message_id: string }> {
+  return sendViaMeta({ ...args, kind: 'interactive' })
+}
 
 async function sendViaMeta(input: SendInput): Promise<{ whatsapp_message_id: string }> {
   const db = supabaseAdmin()
@@ -103,6 +126,43 @@ async function sendViaMeta(input: SendInput): Promise<{ whatsapp_message_id: str
         templateName: input.templateName,
         language: input.language,
         params: input.params,
+        template: input.template,
+        messageParams: input.template && input.params
+          ? { body: input.params }
+          : undefined,
+      })
+      return r.messageId
+    }
+    if (input.kind === 'interactive') {
+      // If any button has a URL, use cta_url interactive type (one URL button,
+      // no reply buttons — Meta does not support mixing the two).
+      const urlButton = input.buttons.find((b) => b.url)
+      if (urlButton) {
+        const r = await sendCtaUrl({
+          phoneNumberId: config.phone_number_id,
+          accessToken,
+          to: phone,
+          bodyText: input.text,
+          headerText: input.header,
+          footerText: input.footer,
+          buttonText: urlButton.title,
+          url: urlButton.url!,
+        })
+        return r.messageId
+      }
+      const r = await sendInteractiveButtons({
+        phoneNumberId: config.phone_number_id,
+        accessToken,
+        to: phone,
+        bodyText: input.text,
+        headerText: input.header,
+        footerText: input.footer,
+        // Derive button id from title if not explicitly set (id is only needed
+        // when the automation wants to match a specific webhook payload).
+        buttons: input.buttons.map((b) => ({
+          id: b.id ?? b.title.toLowerCase().replace(/\s+/g, '_').slice(0, 256),
+          title: b.title,
+        })),
       })
       return r.messageId
     }
@@ -143,8 +203,9 @@ async function sendViaMeta(input: SendInput): Promise<{ whatsapp_message_id: str
   // Persist the sent message so it appears in the inbox with a real
   // Meta message id. sender_type='bot' distinguishes automation sends
   // from manual agent sends.
-  const content_type = input.kind === 'template' ? 'template' : 'text'
-  const content_text = input.kind === 'text' ? input.text : null
+  const content_type =
+    input.kind === 'template' ? 'template' : input.kind === 'interactive' ? 'interactive' : 'text'
+  const content_text = input.kind === 'text' || input.kind === 'interactive' ? input.text : null
   const template_name = input.kind === 'template' ? input.templateName : null
 
   const { error: msgErr } = await db.from('messages').insert({
@@ -166,7 +227,9 @@ async function sendViaMeta(input: SendInput): Promise<{ whatsapp_message_id: str
     .from('conversations')
     .update({
       last_message_text:
-        input.kind === 'template' ? `[template:${input.templateName}]` : input.text,
+        input.kind === 'template'
+          ? `[template:${input.templateName}]`
+          : input.text,
       last_message_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     })

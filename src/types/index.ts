@@ -380,6 +380,7 @@ export type AutomationTriggerType =
 export type AutomationStepType =
   | 'send_message'
   | 'send_template'
+  | 'send_interactive'
   | 'add_tag'
   | 'remove_tag'
   | 'assign_conversation'
@@ -423,6 +424,28 @@ export interface SendTemplateStepConfig {
   template_name: string;
   language?: string;
   variables?: Record<string, string>;
+}
+
+export interface SendInteractiveButton {
+  /** Visible label on the button (≤ 20 chars per Meta). */
+  title: string;
+  /** Payload sent back in the webhook when tapped. Auto-derived from title if omitted. */
+  id?: string;
+  /** When set, the button opens this URL (uses Meta cta_url interactive type).
+   *  Only ONE button per message may have a URL; mixing URL + reply buttons
+   *  is not supported by the Meta API. */
+  url?: string;
+}
+
+export interface SendInteractiveStepConfig {
+  /** Main message body. Supports {{ contact.name }}, {{ message.text }}, etc. */
+  text: string;
+  /** Optional plain-text header (≤ 60 chars). */
+  header?: string;
+  /** Optional grey footer text (≤ 60 chars). */
+  footer?: string;
+  /** 1–3 quick-reply buttons. Requires an active 24-hour conversation window. */
+  buttons: SendInteractiveButton[];
 }
 
 export interface TagStepConfig {
@@ -482,6 +505,7 @@ export interface SendWebhookStepConfig {
 export type AutomationStepConfig =
   | SendMessageStepConfig
   | SendTemplateStepConfig
+  | SendInteractiveStepConfig
   | TagStepConfig
   | AssignConversationStepConfig
   | UpdateContactFieldStepConfig

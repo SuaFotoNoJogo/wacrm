@@ -63,6 +63,14 @@ function validateOne(step: StepLike, path: string, issues: ValidationIssue[]): v
         issues.push({ path: `${path}.template_name`, message: 'template name is required' })
       }
       break
+    case 'send_interactive':
+      if (!nonEmpty(c.text)) {
+        issues.push({ path: `${path}.text`, message: 'message text is required' })
+      }
+      if (!Array.isArray(c.buttons) || (c.buttons as unknown[]).length === 0) {
+        issues.push({ path: `${path}.buttons`, message: 'at least one button is required' })
+      }
+      break
     case 'add_tag':
     case 'remove_tag':
       if (!nonEmpty(c.tag_id)) {

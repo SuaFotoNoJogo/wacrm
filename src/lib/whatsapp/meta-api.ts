@@ -757,6 +757,69 @@ export interface SendInteractiveButtonsArgs {
   contextMessageId?: string
 }
 
+export interface SendCtaUrlArgs {
+  phoneNumberId: string
+  accessToken: string
+  to: string
+  /** Main message body text. */
+  bodyText: string
+  /** Optional plain-text header (≤ 60 chars). */
+  headerText?: string
+  /** Optional grey footer line (≤ 60 chars). */
+  footerText?: string
+  /** The visible button label. */
+  buttonText: string
+  /** The URL the button opens. Must be http(s). */
+  url: string
+  contextMessageId?: string
+}
+
+/**
+ * Send an interactive CTA-URL button message. The recipient sees a tappable
+ * button that opens `url` in their browser. Only ONE button per message.
+ * Works within the 24-hour conversation window (no template approval needed).
+ */
+export async function sendCtaUrl(args: SendCtaUrlArgs): Promise<MetaSendResult> {
+  const { phoneNumberId, accessToken, to, bodyText, headerText, footerText, buttonText, url, contextMessageId } = args
+
+  validateInteractiveBody(bodyText)
+  validateInteractiveHeaderFooter(headerText, footerText)
+  if (!buttonText) throw new Error('CTA URL button missing display text.')
+  if (!url || !/^https?:\/\//i.test(url)) throw new Error('CTA URL button has an invalid URL (must be http/https).')
+
+  const interactive: Record<string, unknown> = {
+    type: 'cta_url',
+    body: { text: bodyText },
+    action: {
+      name: 'cta_url',
+      parameters: { display_text: buttonText, url },
+    },
+  }
+  if (headerText) interactive.header = { type: 'text', text: headerText }
+  if (footerText) interactive.footer = { text: footerText }
+
+  const payload: Record<string, unknown> = {
+    messaging_product: 'whatsapp',
+    recipient_type: 'individual',
+    to,
+    type: 'interactive',
+    interactive,
+  }
+  if (contextMessageId) payload.context = { message_id: contextMessageId }
+
+  const apiUrl = `${META_API_BASE}/${phoneNumberId}/messages`
+  const response = await fetch(apiUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` },
+    body: JSON.stringify(payload),
+  })
+  if (!response.ok) {
+    await throwMetaError(response, `Meta API error: ${response.status}`)
+  }
+  const data = await response.json()
+  return { messageId: data.messages[0].id }
+}
+
 /**
  * Send an interactive message with up to 3 inline reply buttons. The
  * customer taps one and Meta delivers a webhook with

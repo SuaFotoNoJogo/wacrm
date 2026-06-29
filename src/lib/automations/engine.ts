@@ -5,6 +5,7 @@ import type {
   AutomationTriggerType,
   ConditionStepConfig,
   KeywordMatchTriggerConfig,
+  SendInteractiveStepConfig,
   SendMessageStepConfig,
   SendTemplateStepConfig,
   SendWebhookStepConfig,
@@ -15,7 +16,7 @@ import type {
   AssignConversationStepConfig,
 } from '@/types'
 import { supabaseAdmin } from './admin-client'
-import { engineSendText, engineSendTemplate } from './meta-send'
+import { engineSendText, engineSendTemplate, engineSendInteractive } from './meta-send'
 
 // ------------------------------------------------------------
 // Public API
@@ -362,6 +363,25 @@ async function runStep(step: AutomationStep, args: ExecuteArgs): Promise<string>
       if (!args.contactId) throw new Error('send_template needs a contact')
       if (!cfg.template_name) throw new Error('send_template needs template_name')
       const conversationId = await resolveConversationId(args)
+
+      // Fetch template row (for buttons + media) and contact (for {{ contact.X }}
+      // interpolation in variable values) in parallel.
+      const [templateRes, contactRes] = await Promise.all([
+        db
+          .from('message_templates')
+          .select('*')
+          .eq('name', cfg.template_name)
+          .eq('account_id', args.automation.account_id)
+          .maybeSingle(),
+        db
+          .from('contacts')
+          .select('id, name, phone, email, company')
+          .eq('id', args.contactId)
+          .maybeSingle(),
+      ])
+      const templateRow = templateRes.data ?? undefined
+      const contactRow = contactRes.data ?? undefined
+
       // Meta templates use positional {{1}}, {{2}}, … placeholders, so
       // we MUST emit params in strict numeric order. Lexicographic sort
       // of "1", "2", …, "10" yields "1", "10", "2", … which silently
@@ -378,18 +398,51 @@ async function runStep(step: AutomationStep, args: ExecuteArgs): Promise<string>
               if (bNum) return 1
               return a.localeCompare(b)
             })
-            .map((k) => String(cfg.variables![k]))
+            .map((k) =>
+              // Allow {{ contact.name }}, {{ contact.phone }} etc. in variable
+              // values so automation authors don't need to know contact IDs.
+              interpolate(String(cfg.variables![k]), args, contactRow),
+            )
         : []
+
       const { whatsapp_message_id } = await engineSendTemplate({
         accountId: args.automation.account_id,
         userId: args.automation.user_id,
         conversationId,
         contactId: args.contactId,
         templateName: cfg.template_name,
-        language: cfg.language,
+        language: cfg.language ?? templateRow?.language,
         params,
+        template: templateRow,
       })
       return `template sent via Meta (${whatsapp_message_id})`
+    }
+
+    case 'send_interactive': {
+      const cfg = step.step_config as SendInteractiveStepConfig
+      if (!args.contactId) throw new Error('send_interactive needs a contact')
+      if (!cfg.text?.trim()) throw new Error('send_interactive has empty text')
+      if (!cfg.buttons?.length) throw new Error('send_interactive needs at least one button')
+
+      const { data: contactRow } = await db
+        .from('contacts')
+        .select('id, name, phone, email, company')
+        .eq('id', args.contactId)
+        .maybeSingle()
+
+      const text = interpolate(cfg.text, args, contactRow)
+      const conversationId = await resolveConversationId(args)
+      const { whatsapp_message_id } = await engineSendInteractive({
+        accountId: args.automation.account_id,
+        userId: args.automation.user_id,
+        conversationId,
+        contactId: args.contactId,
+        text,
+        header: cfg.header ? interpolate(cfg.header, args, contactRow) : undefined,
+        footer: cfg.footer,
+        buttons: cfg.buttons,
+      })
+      return `interactive message sent via Meta (${whatsapp_message_id})`
     }
 
     case 'add_tag': {
@@ -648,11 +701,16 @@ function waitMs(cfg: WaitStepConfig): number {
   return Math.max(1_000, cfg.amount * unitMs)
 }
 
-function interpolate(s: string, args: ExecuteArgs): string {
+function interpolate(
+  s: string,
+  args: ExecuteArgs,
+  contact?: Record<string, unknown> | null,
+): string {
   return s.replace(/\{\{\s*([\w.]+)\s*\}\}/g, (_, key) => {
     const [ns, prop] = String(key).split('.')
     if (ns === 'message' && prop === 'text') return String(args.context.message_text ?? '')
     if (ns === 'vars' && prop) return String(args.context.vars?.[prop] ?? '')
+    if (ns === 'contact' && prop && contact) return String(contact[prop] ?? '')
     return ''
   })
 }
