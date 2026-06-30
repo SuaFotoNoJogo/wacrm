@@ -53,7 +53,7 @@ interface SeedRow {
   index: number
   step_type: AutomationStepType
   step_config: Record<string, unknown>
-  branch: "yes" | "no" | null
+  branch: string | null
   parent_index: number | null
 }
 
@@ -83,8 +83,10 @@ function expandFromSeeds(rows: SeedRow[]): BuilderStep[] {
       return
     }
     const parent = nodes[r.parent_index]
-    if (!parent.branches) parent.branches = { yes: [], no: [] }
-    parent.branches[r.branch ?? "yes"].push(nodes[i])
+    if (!parent.branches) parent.branches = {}
+    const key = r.branch ?? "yes"
+    if (!parent.branches[key]) parent.branches[key] = []
+    parent.branches[key].push(nodes[i])
   })
   return roots
 }

@@ -57,7 +57,7 @@ export async function GET(request: Request) {
       contact_id: (row.contact_id as string | null) ?? null,
       log_id: (row.log_id as string | null) ?? null,
       parent_step_id: (row.parent_step_id as string | null) ?? null,
-      branch: (row.branch as 'yes' | 'no' | null) ?? null,
+      branch: (row.branch as string | null) ?? null,
       next_step_position: row.next_step_position as number,
       context: (row.context as AutomationContext) ?? {},
     })

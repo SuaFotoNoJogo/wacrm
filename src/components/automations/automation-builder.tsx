@@ -24,6 +24,7 @@ import {
   Briefcase,
   Hourglass,
   GitBranch,
+  Layers,
   Webhook,
   CircleSlash,
   Zap,
@@ -33,6 +34,7 @@ import {
   ExternalLink,
   MousePointerClick,
   Phone,
+  X,
 } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
@@ -52,6 +54,8 @@ import type {
   CustomField,
   KeywordMatchTriggerConfig,
   MessageTemplate,
+  SwitchCase,
+  SwitchOperator,
   Tag as TagRecord,
 } from "@/types"
 import { createClient } from "@/lib/supabase/client"
@@ -66,7 +70,7 @@ export interface BuilderStep {
   cid: string
   step_type: AutomationStepType
   step_config: Record<string, unknown>
-  branches?: { yes: BuilderStep[]; no: BuilderStep[] }
+  branches?: Record<string, BuilderStep[]>
 }
 
 export interface BuilderInitial {
@@ -101,6 +105,7 @@ const STEP_META: Record<AutomationStepType, StepMeta> = {
   create_deal: { label: "Create Deal", icon: Briefcase, border: "border-l-primary" },
   wait: { label: "Wait", icon: Hourglass, border: "border-l-border" },
   condition: { label: "Condition (If/Else)", icon: GitBranch, border: "border-l-amber-500" },
+  switch: { label: "Switch (Route by field)", icon: Layers, border: "border-l-violet-500" },
   send_webhook: { label: "Send Webhook", icon: Webhook, border: "border-l-primary" },
   close_conversation: { label: "Close Conversation", icon: CircleSlash, border: "border-l-primary" },
 }
@@ -116,6 +121,7 @@ const ADDABLE_STEPS: AutomationStepType[] = [
   "create_deal",
   "wait",
   "condition",
+  "switch",
   "send_webhook",
   "close_conversation",
 ]
@@ -164,6 +170,10 @@ function blankConfig(type: AutomationStepType): Record<string, unknown> {
       return { amount: 1, unit: "hours" }
     case "condition":
       return { subject: "tag_presence", operand: "", value: "" }
+    case "switch": {
+      const id = `case_${Date.now()}`
+      return { cases: [{ id, field_key: "name", operator: "equals", value: "" }] }
+    }
     case "send_webhook":
       return { url: "", headers: {}, body_template: "" }
     case "close_conversation":
@@ -719,11 +729,19 @@ export function AutomationBuilder({ initial }: { initial: BuilderInitial }) {
   }
 
   function addStepAt(parent: ParentScope, index: number, type: AutomationStepType) {
+    let initialBranches: Record<string, BuilderStep[]> | undefined
+    if (type === "condition") {
+      initialBranches = { yes: [], no: [] }
+    } else if (type === "switch") {
+      const cfg = blankConfig(type) as { cases: Array<{ id: string }> }
+      const firstCaseId = cfg.cases[0]?.id ?? `case_${Date.now()}`
+      initialBranches = { [firstCaseId]: [], default: [] }
+    }
     const node: BuilderStep = {
       cid: cid(),
       step_type: type,
       step_config: blankConfig(type),
-      branches: type === "condition" ? { yes: [], no: [] } : undefined,
+      branches: initialBranches,
     }
     setState((s) => ({ ...s, steps: insertAt(s.steps, parent, index, node) }))
     setExpandedId(node.cid)
@@ -1026,11 +1044,11 @@ function KeywordMatchConfig({
 
 type ParentScope =
   | { kind: "root" }
-  | { kind: "branch"; parentCid: string; branch: "yes" | "no" }
+  | { kind: "branch"; parentCid: string; branch: string }
 
 type StepPath = (
   | { kind: "root"; index: number }
-  | { kind: "branch"; parentCid: string; branch: "yes" | "no"; index: number }
+  | { kind: "branch"; parentCid: string; branch: string; index: number }
 )[]
 
 interface StepListProps {
@@ -1087,20 +1105,26 @@ function StepRenderer({
   parentScope: ParentScope
   parentPath: StepPath
 } & Omit<StepListProps, "steps" | "parentPath">) {
-  const path: StepPath = [
-    ...parentPath,
+  // When inside a branch, parentPath ends with a scope-marker element whose
+  // index is a placeholder. Replace it with the actual child index instead
+  // of appending a third element (which would make mapAtPath unable to find
+  // the step because walkBranches would recurse one level too deep).
+  const path: StepPath =
     parentScope.kind === "root"
-      ? { kind: "root", index }
-      : { kind: "branch", parentCid: parentScope.parentCid, branch: parentScope.branch, index },
-  ]
+      ? [...parentPath, { kind: "root" as const, index }]
+      : [
+          ...parentPath.slice(0, -1),
+          { kind: "branch" as const, parentCid: parentScope.parentCid, branch: parentScope.branch, index },
+        ]
   const meta = STEP_META[step.step_type]
   const Icon = meta.icon
   const expanded = props.expandedId === step.cid
   const isCondition = step.step_type === "condition"
+  const isSwitch = step.step_type === "switch"
   // Card widths on mobile fill the full canvas column (max-w-2xl px-4
   // still keeps them reasonable). On sm+ the original fixed widths
   // come back so the flow visual stays recognisable.
-  const width = isCondition
+  const width = (isCondition || isSwitch)
     ? "w-full max-w-[400px] sm:w-[400px]"
     : "w-full max-w-[320px] sm:w-80"
 
@@ -1124,7 +1148,7 @@ function StepRenderer({
             </div>
             <div className="min-w-0 flex-1">
               <div className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                {isCondition ? "Condition" : step.step_type === "wait" ? "Wait" : "Action"}
+                {isCondition ? "Condition" : isSwitch ? "Switch" : step.step_type === "wait" ? "Wait" : "Action"}
               </div>
               <div className="truncate text-sm font-medium text-foreground">{meta.label}</div>
               <div className="truncate text-[11px] text-muted-foreground">{previewFor(step)}</div>
@@ -1176,12 +1200,14 @@ function StepRenderer({
         {isCondition && (
           <ConditionBranches step={step} parentPath={path} {...props} />
         )}
+        {isSwitch && (
+          <SwitchBranches step={step} parentPath={path} {...props} />
+        )}
       </div>
 
-      {/* A condition branches into Yes/No (rendered above by
-          ConditionBranches), so it has no linear "continue" path — adding
-          the trailing connector here would produce a spurious third output. */}
-      {!isCondition && (
+      {/* Branching steps (condition/switch) have no linear "continue" path —
+          adding the trailing connector here would produce a spurious output. */}
+      {!isCondition && !isSwitch && (
         <AddButton
           onPick={(t) => props.addStepAt(parentScope, index + 1, t)}
         />
@@ -1198,8 +1224,8 @@ function ConditionBranches({
   step: BuilderStep
   parentPath: StepPath
 } & Omit<StepListProps, "steps" | "parentPath">) {
-  const yes = step.branches?.yes ?? []
-  const no = step.branches?.no ?? []
+  const yes = step.branches?.["yes"] ?? []
+  const no = step.branches?.["no"] ?? []
   // Build the child scope by appending a branch marker. The scope the
   // StepList uses is driven by the LAST element of parentPath, so the
   // tail's `index` doesn't matter — it's replaced per child during walks.
@@ -1222,6 +1248,59 @@ function ConditionBranches({
       <BranchColumn label="No" color="text-rose-400">
         <StepList {...props} steps={no} parentPath={noPath} />
       </BranchColumn>
+    </div>
+  )
+}
+
+function SwitchBranches({
+  step,
+  parentPath,
+  ...props
+}: {
+  step: BuilderStep
+  parentPath: StepPath
+} & Omit<StepListProps, "steps" | "parentPath">) {
+  const { customFields } = useResources()
+  const cases = (step.step_config.cases ?? []) as SwitchCase[]
+
+  function fieldLabel(fieldKey: string): string {
+    if (fieldKey.startsWith("custom:")) {
+      const id = fieldKey.slice("custom:".length)
+      return customFields.find((f) => f.id === id)?.field_name ?? fieldKey
+    }
+    return fieldKey
+  }
+
+  const allBranches = [
+    ...cases.map((c) => ({
+      id: c.id,
+      label: `${fieldLabel(c.field_key)} ${c.operator} "${c.value}"`,
+      color: "text-violet-400",
+    })),
+    { id: "default", label: "Default", color: "text-muted-foreground" },
+  ]
+
+  return (
+    // Full-bleed: center the branch columns using the full viewport width so
+    // they are not constrained by the 400 px card container.
+    <div
+      className="mt-3 flex flex-wrap justify-center gap-4"
+      style={{ width: "100vw", marginLeft: "calc(-50vw + 50%)" }}
+    >
+      {allBranches.map(({ id, label, color }) => {
+        const branchSteps = step.branches?.[id] ?? []
+        const branchPath: StepPath = [
+          ...parentPath,
+          { kind: "branch", parentCid: step.cid, branch: id, index: 0 },
+        ]
+        return (
+          <div key={id} className="flex flex-col items-center w-[300px]">
+            <BranchColumn label={label} color={color}>
+              <StepList {...props} steps={branchSteps} parentPath={branchPath} />
+            </BranchColumn>
+          </div>
+        )
+      })}
     </div>
   )
 }
@@ -1270,6 +1349,121 @@ function AddButton({ onPick }: { onPick: (t: AutomationStepType) => void }) {
         </DropdownMenuContent>
       </DropdownMenu>
       <div className="h-4 w-[2px] bg-border" aria-hidden />
+    </div>
+  )
+}
+
+// ------------------------------------------------------------
+// Switch case editor
+// ------------------------------------------------------------
+
+function SwitchCaseEditor({
+  step,
+  onChange,
+}: {
+  step: BuilderStep
+  onChange: (s: BuilderStep) => void
+}) {
+  const { customFields } = useResources()
+  const cases = ((step.step_config.cases ?? []) as SwitchCase[])
+
+  function addCase() {
+    const id = `case_${Date.now()}`
+    const newCase: SwitchCase = { id, field_key: "name", operator: "equals", value: "" }
+    onChange({
+      ...step,
+      step_config: { ...step.step_config, cases: [...cases, newCase] },
+      branches: { ...(step.branches ?? {}), [id]: [] },
+    })
+  }
+
+  function removeCase(id: string) {
+    const { [id]: _removed, ...rest } = step.branches ?? {}
+    onChange({
+      ...step,
+      step_config: { ...step.step_config, cases: cases.filter((c) => c.id !== id) },
+      branches: rest,
+    })
+  }
+
+  function updateCase(id: string, patch: Partial<SwitchCase>) {
+    onChange({
+      ...step,
+      step_config: {
+        ...step.step_config,
+        cases: cases.map((c) => (c.id === id ? { ...c, ...patch } : c)),
+      },
+    })
+  }
+
+  return (
+    <div className="space-y-3">
+      {cases.map((c, i) => (
+        <div key={c.id} className="rounded-md border border-border bg-muted/50 p-2 space-y-2">
+          <div className="flex items-center justify-between">
+            <span className="text-[11px] font-semibold uppercase text-muted-foreground">
+              Case {i + 1}
+            </span>
+            {cases.length > 1 && (
+              <button
+                type="button"
+                onClick={() => removeCase(c.id)}
+                className="text-muted-foreground hover:text-destructive"
+                aria-label="Remove case"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            )}
+          </div>
+          <div className="grid grid-cols-[1fr_auto_1fr] gap-1.5 items-center">
+            <select
+              value={c.field_key}
+              onChange={(e) => updateCase(c.id, { field_key: e.target.value })}
+              className={SELECT_CLASS}
+            >
+              <option value="name">Name</option>
+              <option value="email">Email</option>
+              <option value="company">Company</option>
+              <option value="phone">Phone</option>
+              {customFields.length > 0 && (
+                <optgroup label="Custom fields">
+                  {customFields.map((f) => (
+                    <option key={f.id} value={`custom:${f.id}`}>
+                      {f.field_name}
+                    </option>
+                  ))}
+                </optgroup>
+              )}
+            </select>
+            <select
+              value={c.operator}
+              onChange={(e) => updateCase(c.id, { operator: e.target.value as SwitchOperator })}
+              className={SELECT_CLASS}
+            >
+              <option value="equals">equals</option>
+              <option value="contains">contains</option>
+              <option value="not_equals">not equals</option>
+            </select>
+            <Input
+              value={c.value}
+              onChange={(e) => updateCase(c.id, { value: e.target.value })}
+              placeholder="Value…"
+              className="bg-muted text-foreground"
+            />
+          </div>
+        </div>
+      ))}
+      <button
+        type="button"
+        onClick={addCase}
+        className="flex items-center gap-1 text-xs text-primary hover:text-primary/80"
+      >
+        <Plus className="h-3 w-3" />
+        Add case
+      </button>
+      <p className="text-[10px] text-muted-foreground">
+        Cases are evaluated top-to-bottom. The first match wins. The <strong>Default</strong> branch runs when none match.
+      </p>
     </div>
   )
 }
@@ -1473,6 +1667,13 @@ function StepEditor({
           )}
         </>
       )
+    case "switch":
+      return (
+        <SwitchCaseEditor
+          step={step}
+          onChange={onChange}
+        />
+      )
     case "send_webhook":
       return (
         <>
@@ -1533,6 +1734,12 @@ function previewFor(step: BuilderStep): string {
       return `${step.step_config.amount ?? "?"} ${step.step_config.unit ?? ""}`
     case "condition":
       return `when ${step.step_config.subject ?? "?"}`
+    case "switch": {
+      const cases = (step.step_config.cases as Array<{ field_key?: string; value?: string }> | undefined) ?? []
+      return cases.length > 0
+        ? `${cases.length} case${cases.length > 1 ? "s" : ""} + default`
+        : "no cases yet"
+    }
     case "send_webhook":
       return (step.step_config.url as string) || "no url"
     default:
@@ -1557,7 +1764,7 @@ function insertAt(
   }
   return steps.map((s) => {
     if (s.cid !== parent.parentCid || !s.branches) return s
-    const list = [...s.branches[parent.branch]]
+    const list = [...(s.branches[parent.branch] ?? [])]
     list.splice(index, 0, node)
     return { ...s, branches: { ...s.branches, [parent.branch]: list } }
   })
@@ -1582,7 +1789,7 @@ function mapAtPath(
   }
   return steps.map((s) => {
     if (s.cid !== head.parentCid || !s.branches) return s
-    const bucket = s.branches[head.branch]
+    const bucket = s.branches[head.branch] ?? []
     const updated = bucket.map((child, i) => {
       if (i !== head.index) return child
       return rest.length === 0
@@ -1601,7 +1808,7 @@ function walkBranches(
   if (!branches) return branches
   const head = path[0]
   if (head.kind !== "branch") return branches
-  const bucket = branches[head.branch]
+  const bucket = branches[head.branch] ?? []
   const rest = path.slice(1)
   const updated = bucket.map((child, i) => {
     if (i !== head.index) return child
@@ -1624,7 +1831,7 @@ function removeAt(steps: BuilderStep[], path: StepPath): BuilderStep[] {
   }
   return steps.map((s) => {
     if (s.cid !== head.parentCid || !s.branches) return s
-    const bucket = s.branches[head.branch]
+    const bucket = s.branches[head.branch] ?? []
     const next =
       rest.length === 0
         ? bucket.filter((_, i) => i !== head.index)
@@ -1645,7 +1852,7 @@ function removeFromBranches(
   const head = path[0]
   if (head.kind !== "branch") return branches
   const rest = path.slice(1)
-  const bucket = branches[head.branch]
+  const bucket = branches[head.branch] ?? []
   const next =
     rest.length === 0
       ? bucket.filter((_, i) => i !== head.index)
@@ -1680,7 +1887,7 @@ function moveAt(
   }
   return steps.map((s) => {
     if (s.cid !== head.parentCid || !s.branches) return s
-    const bucket = s.branches[head.branch]
+    const bucket = s.branches[head.branch] ?? []
     const next = rest.length === 0 ? swap(bucket, head.index) : bucket
     return { ...s, branches: { ...s.branches, [head.branch]: next } }
   })
@@ -1695,7 +1902,7 @@ function moveInBranches(
   const head = path[0]
   if (head.kind !== "branch") return branches
   const rest = path.slice(1)
-  const bucket = branches[head.branch]
+  const bucket = branches[head.branch] ?? []
   const swap = <T,>(arr: T[], i: number) => {
     const j = i + direction
     if (j < 0 || j >= arr.length) return arr
@@ -1714,7 +1921,7 @@ function moveInBranches(
 interface ApiStep {
   step_type: string
   step_config: Record<string, unknown>
-  branches?: { yes?: ApiStep[]; no?: ApiStep[] }
+  branches?: Record<string, ApiStep[]>
 }
 
 export function toApiSteps(steps: BuilderStep[]): ApiStep[] {
@@ -1722,7 +1929,9 @@ export function toApiSteps(steps: BuilderStep[]): ApiStep[] {
     step_type: s.step_type,
     step_config: s.step_config,
     branches: s.branches
-      ? { yes: toApiSteps(s.branches.yes), no: toApiSteps(s.branches.no) }
+      ? Object.fromEntries(
+          Object.entries(s.branches).map(([k, v]) => [k, toApiSteps(v)])
+        )
       : undefined,
   }))
 }
@@ -1735,20 +1944,29 @@ export interface ServerStepNode {
   id: string
   step_type: string
   step_config: Record<string, unknown>
-  branches: { yes: ServerStepNode[]; no: ServerStepNode[] }
+  branches: Record<string, ServerStepNode[]>
 }
 
 export function fromServerSteps(nodes: ServerStepNode[]): BuilderStep[] {
-  return nodes.map((n) => ({
-    cid: cid(),
-    step_type: n.step_type as AutomationStepType,
-    step_config: n.step_config ?? {},
-    branches:
-      n.step_type === "condition"
-        ? {
-            yes: fromServerSteps(n.branches?.yes ?? []),
-            no: fromServerSteps(n.branches?.no ?? []),
-          }
-        : undefined,
-  }))
+  return nodes.map((n) => {
+    let branches: BuilderStep["branches"]
+    if (n.step_type === "condition" || n.step_type === "switch") {
+      branches = n.branches
+        ? Object.fromEntries(Object.entries(n.branches).map(([k, v]) => [k, fromServerSteps(v)]))
+        : {}
+      if (n.step_type === "switch") {
+        const cases = (n.step_config?.cases as Array<{ id: string }> | undefined) ?? []
+        for (const c of cases) {
+          if (!branches[c.id]) branches[c.id] = []
+        }
+        if (!branches["default"]) branches["default"] = []
+      }
+    }
+    return {
+      cid: cid(),
+      step_type: n.step_type as AutomationStepType,
+      step_config: n.step_config ?? {},
+      branches,
+    }
+  })
 }

@@ -9,6 +9,8 @@ import type {
   SendMessageStepConfig,
   SendTemplateStepConfig,
   SendWebhookStepConfig,
+  SwitchCase,
+  SwitchStepConfig,
   TagStepConfig,
   UpdateContactFieldStepConfig,
   WaitStepConfig,
@@ -125,7 +127,7 @@ export async function resumePendingExecution(pending: {
   contact_id: string | null
   log_id: string | null
   parent_step_id: string | null
-  branch: 'yes' | 'no' | null
+  branch: string | null
   next_step_position: number
   context: AutomationContext
 }): Promise<void> {
@@ -218,7 +220,7 @@ interface ExecuteArgs {
   contactId: string | null
   context: AutomationContext
   parentStepId: string | null
-  branch: 'yes' | 'no' | null
+  branch: string | null
   startPosition: number
   logId: string | null
   triggerEvent: string
@@ -303,6 +305,31 @@ async function executeStepsFrom(args: ExecuteArgs): Promise<void> {
           ...args,
           parentStepId: step.id,
           branch: taken ? 'yes' : 'no',
+          startPosition: 0,
+          logId: args.logId,
+        })
+        continue
+      }
+
+      if (step.step_type === 'switch') {
+        const cfg = step.step_config as SwitchStepConfig
+        let matchedBranch = 'default'
+        for (const switchCase of cfg.cases ?? []) {
+          if (await evaluateSwitchCase(switchCase, args)) {
+            matchedBranch = switchCase.id
+            break
+          }
+        }
+        results.push({
+          step_id: step.id,
+          step_type: 'switch',
+          status: 'success',
+          detail: `branch=${matchedBranch}`,
+        })
+        await executeStepsFrom({
+          ...args,
+          parentStepId: step.id,
+          branch: matchedBranch,
           startPosition: 0,
           logId: args.logId,
         })
@@ -693,6 +720,46 @@ async function evaluateCondition(cfg: ConditionStepConfig, args: ExecuteArgs): P
     }
     default:
       return false
+  }
+}
+
+async function evaluateSwitchCase(switchCase: SwitchCase, args: ExecuteArgs): Promise<boolean> {
+  if (!args.contactId) return false
+  const db = supabaseAdmin()
+  const { field_key, operator, value } = switchCase
+
+  let fieldValue: string | null = null
+
+  if (field_key.startsWith('custom:')) {
+    const customFieldId = field_key.slice('custom:'.length)
+    const { data } = await db
+      .from('contact_custom_values')
+      .select('value')
+      .eq('contact_id', args.contactId)
+      .eq('custom_field_id', customFieldId)
+      .maybeSingle()
+    fieldValue = data?.value ?? null
+  } else {
+    const { data } = await db
+      .from('contacts')
+      .select(field_key)
+      .eq('id', args.contactId)
+      .eq('account_id', args.automation.account_id)
+      .maybeSingle()
+    const raw = (data as Record<string, unknown> | null)?.[field_key]
+    fieldValue = raw != null ? String(raw) : null
+  }
+
+  if (fieldValue === null) return operator === 'not_equals'
+
+  const haystack = fieldValue.toLowerCase()
+  const needle = (value ?? '').toLowerCase()
+
+  switch (operator) {
+    case 'equals':     return fieldValue === (value ?? '')
+    case 'contains':   return haystack.includes(needle)
+    case 'not_equals': return fieldValue !== (value ?? '')
+    default:           return false
   }
 }
 

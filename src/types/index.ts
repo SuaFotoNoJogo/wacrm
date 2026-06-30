@@ -388,6 +388,7 @@ export type AutomationStepType =
   | 'create_deal'
   | 'wait'
   | 'condition'
+  | 'switch'
   | 'send_webhook'
   | 'close_conversation';
 
@@ -502,6 +503,21 @@ export interface SendWebhookStepConfig {
   body_template?: string;
 }
 
+export type SwitchOperator = 'equals' | 'contains' | 'not_equals';
+
+export interface SwitchCase {
+  /** Stable per-case identifier, used as the branch key in automation_steps. */
+  id: string;
+  /** Built-in field name (name, email, company, phone) or "custom:<uuid>". */
+  field_key: string;
+  operator: SwitchOperator;
+  value: string;
+}
+
+export interface SwitchStepConfig {
+  cases: SwitchCase[];
+}
+
 export type AutomationStepConfig =
   | SendMessageStepConfig
   | SendTemplateStepConfig
@@ -512,6 +528,7 @@ export type AutomationStepConfig =
   | CreateDealStepConfig
   | WaitStepConfig
   | ConditionStepConfig
+  | SwitchStepConfig
   | SendWebhookStepConfig
   | Record<string, never>
   | Record<string, unknown>;
@@ -540,7 +557,7 @@ export interface AutomationStep {
   id: string;
   automation_id: string;
   parent_step_id?: string | null;
-  branch?: 'yes' | 'no' | null;
+  branch?: string | null;
   step_type: AutomationStepType;
   step_config: AutomationStepConfig;
   position: number;

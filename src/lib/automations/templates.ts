@@ -14,7 +14,7 @@ export type TemplateSlug =
 export interface TemplateStepSeed {
   step_type: AutomationStepType
   step_config: AutomationStepConfig
-  branch?: 'yes' | 'no' | null
+  branch?: string | null
   /** Index (within this seed list) of the Condition parent, if nested. */
   parent_index?: number | null
 }

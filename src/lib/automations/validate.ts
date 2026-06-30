@@ -23,7 +23,7 @@ export interface ValidationIssue {
 interface StepLike {
   step_type: string
   step_config: Record<string, unknown>
-  branches?: { yes?: StepLike[]; no?: StepLike[] }
+  branches?: Record<string, StepLike[]>
 }
 
 export function validateStepsForActivation(steps: StepLike[]): ValidationIssue[] {
@@ -43,9 +43,10 @@ function walk(steps: StepLike[], prefix: string, issues: ValidationIssue[]): voi
   steps.forEach((s, i) => {
     const path = `${prefix}steps[${i}]`
     validateOne(s, path, issues)
-    if (s.step_type === 'condition' && s.branches) {
-      if (s.branches.yes) walk(s.branches.yes, `${path}.yes.`, issues)
-      if (s.branches.no) walk(s.branches.no, `${path}.no.`, issues)
+    if ((s.step_type === 'condition' || s.step_type === 'switch') && s.branches) {
+      for (const [key, children] of Object.entries(s.branches)) {
+        if (children) walk(children, `${path}.${key}.`, issues)
+      }
     }
   })
 }
@@ -140,6 +141,21 @@ function validateOne(step: StepLike, path: string, issues: ValidationIssue[]): v
         issues.push({ path: `${path}.url`, message: 'webhook URL is not a valid URL' })
       }
       break
+    case 'switch': {
+      const cases = Array.isArray(c.cases) ? (c.cases as Record<string, unknown>[]) : []
+      if (cases.length === 0) {
+        issues.push({ path: `${path}.cases`, message: 'switch needs at least one case' })
+      }
+      cases.forEach((sc, i) => {
+        if (!nonEmpty(sc.field_key)) {
+          issues.push({ path: `${path}.cases[${i}].field_key`, message: 'case field is required' })
+        }
+        if (!nonEmpty(sc.operator)) {
+          issues.push({ path: `${path}.cases[${i}].operator`, message: 'case operator is required' })
+        }
+      })
+      break
+    }
     case 'close_conversation':
       // No config required.
       break
