@@ -1,4 +1,5 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { toNFC } from '@/lib/text/unicode';
 
 const DEFAULT_TAG_COLOR = '#3b82f6';
 
@@ -34,7 +35,7 @@ export async function resolveImportTagIds(
   const uniqueNames: string[] = [];
   const seen = new Set<string>();
   for (const raw of tagNames) {
-    const name = raw.trim();
+    const name = toNFC(raw.trim());
     if (!name) continue;
     const key = name.toLowerCase();
     if (seen.has(key)) continue;
@@ -55,7 +56,7 @@ export async function resolveImportTagIds(
 
   const tagIdByKey = new Map<string, string>();
   for (const tag of existing ?? []) {
-    const key = tag.name.trim().toLowerCase();
+    const key = toNFC(tag.name.trim()).toLowerCase();
     if (!tagIdByKey.has(key)) tagIdByKey.set(key, tag.id);
   }
 

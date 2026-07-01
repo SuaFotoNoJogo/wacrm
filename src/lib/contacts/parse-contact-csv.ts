@@ -3,6 +3,8 @@
  * tag-column handling stays aligned with phone/name/email/company.
  */
 
+import { toNFC } from '@/lib/text/unicode';
+
 export interface ParsedContactRow {
   phone: string;
   name?: string;
@@ -22,7 +24,7 @@ export function parseTagCell(value: string | undefined): string[] {
   const names: string[] = [];
 
   for (const part of value.split(/[,;]/)) {
-    const name = part.trim();
+    const name = toNFC(part.trim());
     if (!name) continue;
     const key = name.toLowerCase();
     if (seen.has(key)) continue;
@@ -51,7 +53,7 @@ export function parseContactCsv(text: string): ParseContactCsvResult {
 
   const headers = lines[0]
     .split(',')
-    .map((h) => h.trim().toLowerCase().replace(/["']/g, ''));
+    .map((h) => toNFC(h.trim().toLowerCase().replace(/["']/g, '')));
 
   const phoneIdx = headers.indexOf('phone');
   if (phoneIdx === -1) {
@@ -86,7 +88,7 @@ export function parseContactCsv(text: string): ParseContactCsvResult {
     for (let j = 0; j < customFieldNames.length; j++) {
       const fieldName = customFieldNames[j];
       const fieldIdx = customFieldIndices[j];
-      const value = values[fieldIdx]?.replace(/["']/g, '').trim();
+      const value = toNFC(values[fieldIdx]?.replace(/["']/g, '').trim() ?? '');
       if (value) {
         customFieldValues[fieldName] = value;
       }
@@ -96,15 +98,15 @@ export function parseContactCsv(text: string): ParseContactCsvResult {
       phone,
       name:
         nameIdx >= 0
-          ? values[nameIdx]?.replace(/["']/g, '').trim() || undefined
+          ? toNFC(values[nameIdx]?.replace(/["']/g, '').trim() ?? '') || undefined
           : undefined,
       email:
         emailIdx >= 0
-          ? values[emailIdx]?.replace(/["']/g, '').trim() || undefined
+          ? toNFC(values[emailIdx]?.replace(/["']/g, '').trim() ?? '') || undefined
           : undefined,
       company:
         companyIdx >= 0
-          ? values[companyIdx]?.replace(/["']/g, '').trim() || undefined
+          ? toNFC(values[companyIdx]?.replace(/["']/g, '').trim() ?? '') || undefined
           : undefined,
       tagNames:
         tagsIdx >= 0 ? parseTagCell(values[tagsIdx]?.replace(/["']/g, '')) : [],

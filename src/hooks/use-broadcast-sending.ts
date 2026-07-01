@@ -2,6 +2,7 @@
 
 import { useState } from 'react';
 import { createClient } from '@/lib/supabase/client';
+import { toNFC } from '@/lib/text/unicode';
 import { useAuth } from '@/hooks/use-auth';
 import { Contact, MessageTemplate } from '@/types';
 
@@ -46,6 +47,11 @@ interface BroadcastPayload {
    * falls back to the template's stored URL only when this is empty.
    */
   headerMediaUrl?: string;
+  /**
+   * When set, updates this existing broadcast row (e.g. a draft) to
+   * status='sending' instead of creating a new row.
+   */
+  existingBroadcastId?: string;
 }
 
 interface UseBroadcastSendingReturn {
@@ -55,12 +61,18 @@ interface UseBroadcastSendingReturn {
 }
 
 /**
- * Meta rate-limit buffer. 10 per batch + 1 s pause matches the spec
- * and keeps us comfortably under Meta's per-phone-number messaging
- * rate so a large broadcast never trips the upstream limiter.
+ * Meta rate-limit buffer. Each batch is sent to /api/whatsapp/broadcast
+ * which adds a 250 ms gap between individual sends server-side. The
+ * inter-batch pause here gives Meta (and our server) a breather between
+ * API calls so we stay well under their 40 msg/s Cloud API threshold
+ * even on low-quality-rated accounts.
+ *
+ * Effective rate: 5 msgs × (API_latency + 250 ms) ≈ 5 msgs in ~1.75 s,
+ * then +2 s pause → ~1.7 msgs/s sustained. Adjusting these two constants
+ * is the only knob needed to trade speed for safety.
  */
-const SEND_BATCH_SIZE = 10;
-const SEND_BATCH_DELAY_MS = 1000;
+const SEND_BATCH_SIZE = 5;
+const SEND_BATCH_DELAY_MS = 2000;
 
 /** `broadcast_recipients` inserts are independent of the send rate. */
 const INSERT_BATCH_SIZE = 200;
@@ -308,7 +320,8 @@ export function useBroadcastSending(): UseBroadcastSendingReturn {
     supabase: ReturnType<typeof createClient>,
     filter: CustomFieldFilter,
   ): Promise<Contact[]> {
-    const { fieldId, operator, value } = filter;
+    const { fieldId, operator } = filter;
+    const value = toNFC(filter.value);
 
     // Standard contact fields (name, email, phone, company) are stored in
     // the contacts table directly. Custom fields go through contact_custom_values.
@@ -381,44 +394,65 @@ export function useBroadcastSending(): UseBroadcastSendingReturn {
         throw new Error('No contacts found for this audience.');
       }
 
-      // ── Step 2: Create broadcast row ──────────────────────────────
+      // ── Step 2: Create or update broadcast row ────────────────────
       setProgress(10);
-      const { data: broadcast, error: broadcastError } = await supabase
-        .from('broadcasts')
-        .insert({
-          user_id: user.id,
-          account_id: accountId,
-          name: payload.name,
-          template_name: payload.template.name,
-          template_language: payload.template.language ?? 'en_US',
-          template_variables: payload.variables,
-          audience_filter: {
-            type: payload.audience.type,
-            tagIds: payload.audience.tagIds,
-            customField: payload.audience.customField,
-            excludeTagIds: payload.audience.excludeTagIds,
-          },
-          status: 'sending',
-          total_recipients: contacts.length,
-          sent_count: 0,
-          delivered_count: 0,
-          read_count: 0,
-          replied_count: 0,
-          failed_count: 0,
-        })
-        .select()
-        .single();
+      let broadcastId: string;
 
-      if (broadcastError || !broadcast) {
-        throw new Error(
-          `Failed to create broadcast: ${broadcastError?.message ?? 'unknown error'}`,
-        );
+      if (payload.existingBroadcastId) {
+        const { error: updateError } = await supabase
+          .from('broadcasts')
+          .update({
+            status: 'sending',
+            total_recipients: contacts.length,
+            sent_count: 0,
+            delivered_count: 0,
+            read_count: 0,
+            replied_count: 0,
+            failed_count: 0,
+          })
+          .eq('id', payload.existingBroadcastId);
+        if (updateError) {
+          throw new Error(`Failed to update broadcast: ${updateError.message}`);
+        }
+        broadcastId = payload.existingBroadcastId;
+      } else {
+        const { data: newBroadcast, error: broadcastError } = await supabase
+          .from('broadcasts')
+          .insert({
+            user_id: user.id,
+            account_id: accountId,
+            name: payload.name,
+            template_name: payload.template.name,
+            template_language: payload.template.language ?? 'en_US',
+            template_variables: payload.variables,
+            audience_filter: {
+              type: payload.audience.type,
+              tagIds: payload.audience.tagIds,
+              customField: payload.audience.customField,
+              excludeTagIds: payload.audience.excludeTagIds,
+            },
+            status: 'sending',
+            total_recipients: contacts.length,
+            sent_count: 0,
+            delivered_count: 0,
+            read_count: 0,
+            replied_count: 0,
+            failed_count: 0,
+          })
+          .select()
+          .single();
+        if (broadcastError || !newBroadcast) {
+          throw new Error(
+            `Failed to create broadcast: ${broadcastError?.message ?? 'unknown error'}`,
+          );
+        }
+        broadcastId = newBroadcast.id;
       }
 
       // ── Step 3: Insert recipient rows ─────────────────────────────
       setProgress(20);
       const recipientRows = contacts.map((contact) => ({
-        broadcast_id: broadcast.id,
+        broadcast_id: broadcastId,
         contact_id: contact.id,
         status: 'pending' as const,
       }));
@@ -440,7 +474,7 @@ export function useBroadcastSending(): UseBroadcastSendingReturn {
               status: 'failed',
               failed_count: contacts.length,
             })
-            .eq('id', broadcast.id);
+            .eq('id', broadcastId);
           throw new Error(
             `Failed to insert recipient batch ${i / INSERT_BATCH_SIZE + 1}: ${recipientError.message}`,
           );
@@ -452,7 +486,7 @@ export function useBroadcastSending(): UseBroadcastSendingReturn {
       const { data: recipients, error: recipientsFetchError } = await supabase
         .from('broadcast_recipients')
         .select('*, contact:contacts(*)')
-        .eq('broadcast_id', broadcast.id);
+        .eq('broadcast_id', broadcastId);
 
       if (recipientsFetchError || !recipients) {
         throw new Error('Failed to fetch broadcast recipients');
@@ -612,10 +646,10 @@ export function useBroadcastSending(): UseBroadcastSendingReturn {
       await supabase
         .from('broadcasts')
         .update({ status: finalStatus })
-        .eq('id', broadcast.id);
+        .eq('id', broadcastId);
 
       setProgress(100);
-      return broadcast.id;
+      return broadcastId;
     } finally {
       setIsProcessing(false);
     }

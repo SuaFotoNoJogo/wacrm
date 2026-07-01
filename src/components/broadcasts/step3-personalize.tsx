@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { createClient } from '@/lib/supabase/client';
 import { Contact, CustomField, MessageTemplate } from '@/types';
+import { isStandardFieldName } from '@/lib/contacts/standard-field-names';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import {
@@ -103,7 +104,10 @@ export function Step3Personalize({
       ]);
       if (cancelled) return;
 
-      setCustomFields(fieldsRes.data ?? []);
+      // Fields shadowing a standard contact field (name/phone/email/
+      // company/tags) are stray/empty — the real value maps via the
+      // "field" mapping type above, not "custom_field".
+      setCustomFields((fieldsRes.data ?? []).filter((f) => !isStandardFieldName(f.field_name)));
       setLoadingFields(false);
 
       const contact = contactRes.data ?? null;

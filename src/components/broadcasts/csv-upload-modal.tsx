@@ -13,6 +13,7 @@ import {
 import { Button } from '@/components/ui/button';
 import { Upload, FileText, Loader2, X } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { toNFC } from '@/lib/text/unicode';
 
 interface CsvContact {
   phone: string;
@@ -49,7 +50,7 @@ function parseBroadcastCsv(text: string): CsvContact[] {
 
     contacts.push({
       phone,
-      name: nameIdx >= 0 ? values[nameIdx]?.trim() || undefined : undefined,
+      name: nameIdx >= 0 ? toNFC(values[nameIdx]?.trim() ?? '') || undefined : undefined,
     });
   }
 

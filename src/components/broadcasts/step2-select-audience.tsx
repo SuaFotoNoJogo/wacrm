@@ -2,6 +2,8 @@
 
 import { useEffect, useState, useCallback } from 'react';
 import { createClient } from '@/lib/supabase/client';
+import { toNFC } from '@/lib/text/unicode';
+import { isStandardFieldName } from '@/lib/contacts/standard-field-names';
 import { CustomField, Tag } from '@/types';
 import { Button } from '@/components/ui/button';
 import { CsvUploadModal } from './csv-upload-modal';
@@ -139,7 +141,12 @@ export function Step2SelectAudience({
           .from('custom_fields')
           .select('*')
           .order('field_name');
-        setCustomFields(data ?? []);
+        // Fields shadowing a standard contact field (name/phone/email/
+        // company/tags) are usually stray/empty — the real value lives
+        // in the contacts table or tags system instead. Hide them so
+        // they don't sit next to (and get confused with) the real
+        // "Contact Fields" group / "Filter by Tags" audience option.
+        setCustomFields((data ?? []).filter((f) => !isStandardFieldName(f.field_name)));
       } finally {
         setLoadingFields(false);
       }
@@ -172,7 +179,8 @@ export function Step2SelectAudience({
         audience.customField?.fieldId &&
         audience.customField.value
       ) {
-        const { fieldId, operator, value } = audience.customField;
+        const { fieldId, operator } = audience.customField;
+        const value = toNFC(audience.customField.value);
 
         if (isContactField(fieldId)) {
           // Standard contact field — query the contacts table directly.

@@ -11,6 +11,7 @@ import {
   isUniqueViolation,
   type ExistingContact,
 } from '@/lib/contacts/dedupe';
+import { toNFC } from '@/lib/text/unicode';
 import {
   Dialog,
   DialogContent,
@@ -24,8 +25,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
 import { Loader2, AlertTriangle } from 'lucide-react';
-
-const STANDARD_FIELD_NAMES = ['name', 'phone', 'email', 'company', 'tags'];
+import { isStandardFieldName } from '@/lib/contacts/standard-field-names';
 
 interface ContactFormProps {
   open: boolean;
@@ -174,10 +174,10 @@ export function ContactForm({
         const { error } = await supabase
           .from('contacts')
           .update({
-            name: name.trim() || null,
+            name: toNFC(name.trim()) || null,
             phone: phone.trim(),
-            email: email.trim() || null,
-            company: company.trim() || null,
+            email: toNFC(email.trim()) || null,
+            company: toNFC(company.trim()) || null,
             updated_at: new Date().toISOString(),
           })
           .eq('id', contactId);
@@ -188,10 +188,10 @@ export function ContactForm({
           .insert({
             user_id: user.id,
             account_id: accountId,
-            name: name.trim() || null,
+            name: toNFC(name.trim()) || null,
             phone: phone.trim(),
-            email: email.trim() || null,
-            company: company.trim() || null,
+            email: toNFC(email.trim()) || null,
+            company: toNFC(company.trim()) || null,
           })
           .select('id')
           .single();
@@ -215,10 +215,13 @@ export function ContactForm({
         }
       }
 
-      // Sync custom field values
+      // Sync custom field values. Fields shadowing a standard column
+      // (name/phone/email/company/tags) have no input rendered above —
+      // skip them here too, or every save would read an empty
+      // customValues[field.id] and delete any value already stored there.
       if (contactId && customFields.length > 0) {
-        for (const field of customFields) {
-          const val = (customValues[field.id] ?? '').trim();
+        for (const field of customFields.filter((f) => !isStandardFieldName(f.field_name))) {
+          const val = toNFC((customValues[field.id] ?? '').trim());
           if (val) {
             await supabase.from('contact_custom_values').upsert(
               { contact_id: contactId, custom_field_id: field.id, value: val },
@@ -403,7 +406,7 @@ export function ContactForm({
             )}
           </div>
 
-          {customFields.filter((f) => !STANDARD_FIELD_NAMES.includes(f.field_name.toLowerCase())).length > 0 && (
+          {customFields.filter((f) => !isStandardFieldName(f.field_name)).length > 0 && (
             <div className="space-y-2">
               <Label className="text-muted-foreground">Custom Fields</Label>
               {loadingCustom ? (
@@ -413,7 +416,7 @@ export function ContactForm({
                 </div>
               ) : (
                 <div className="space-y-2">
-                  {customFields.filter((f) => !STANDARD_FIELD_NAMES.includes(f.field_name.toLowerCase())).map((field) => (
+                  {customFields.filter((f) => !isStandardFieldName(f.field_name)).map((field) => (
                     <div key={field.id} className="space-y-1">
                       <label className="text-xs text-muted-foreground">{field.field_name}</label>
                       <Input

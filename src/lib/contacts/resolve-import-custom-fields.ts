@@ -1,4 +1,5 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { toNFC } from '@/lib/text/unicode';
 
 export interface ResolveImportCustomFieldsResult {
   /** Custom field name → custom field id. */
@@ -23,7 +24,7 @@ export async function resolveImportCustomFieldIds(
   const uniqueNames: string[] = [];
   const seen = new Set<string>();
   for (const raw of fieldNames) {
-    const name = raw.trim();
+    const name = toNFC(raw.trim());
     if (!name) continue;
     const key = name.toLowerCase();
     if (seen.has(key)) continue;
@@ -45,7 +46,7 @@ export async function resolveImportCustomFieldIds(
   const fieldIdByName = new Map<string, string>();
   const existingLower = new Map<string, string>();
   for (const field of existing ?? []) {
-    const key = field.field_name.trim().toLowerCase();
+    const key = toNFC(field.field_name.trim()).toLowerCase();
     if (!existingLower.has(key)) existingLower.set(key, field.id);
   }
 

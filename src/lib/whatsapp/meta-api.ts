@@ -24,14 +24,33 @@ export interface MetaPhoneInfo {
 }
 
 interface MetaErrorResponse {
-  error?: { message?: string; code?: number; type?: string }
+  error?: {
+    message?: string
+    type?: string
+    code?: number
+    error_subcode?: number
+    /** Meta's server-side trace ID — include in support tickets. */
+    fbtrace_id?: string
+    error_data?: unknown
+  }
 }
 
 async function throwMetaError(response: Response, fallback: string): Promise<never> {
   let message = fallback
   try {
     const data = (await response.json()) as MetaErrorResponse
-    if (data.error?.message) message = data.error.message
+    const e = data.error
+    if (e?.message) {
+      // Build a structured message so callers can detect specific codes
+      // (e.g. 130429 = rate limit, 2 = service unavailable) and logs
+      // include the fbtrace_id needed when opening Meta support tickets.
+      const parts: string[] = []
+      if (e.code)           parts.push(`[${e.code}]`)
+      if (e.error_subcode)  parts.push(`sub:${e.error_subcode}`)
+      parts.push(e.message)
+      if (e.fbtrace_id)     parts.push(`(trace:${e.fbtrace_id})`)
+      message = parts.join(' ')
+    }
   } catch {
     // response body wasn't JSON — keep the fallback
   }

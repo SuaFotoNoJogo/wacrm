@@ -1,10 +1,11 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, useCallback } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { createClient } from '@/lib/supabase/client';
-import { Broadcast, BroadcastRecipient, RecipientStatus } from '@/types';
+import { Broadcast, BroadcastRecipient, RecipientStatus, MessageTemplate } from '@/types';
 import { Button } from '@/components/ui/button';
+import { useBroadcastSending, AudienceConfig, VariableMapping } from '@/hooks/use-broadcast-sending';
 import {
   Table,
   TableBody,
@@ -145,6 +146,7 @@ export default function BroadcastDetailPage() {
   const params = useParams();
   const router = useRouter();
   const broadcastId = params.id as string;
+  const { createAndSendBroadcast, isProcessing, progress } = useBroadcastSending();
 
   const [broadcast, setBroadcast] = useState<Broadcast | null>(null);
   const [recipients, setRecipients] = useState<BroadcastRecipient[]>([]);
@@ -156,37 +158,78 @@ export default function BroadcastDetailPage() {
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
 
+  const fetchData = useCallback(async () => {
+    try {
+      const supabase = createClient();
+
+      const { data: bc, error: bcError } = await supabase
+        .from('broadcasts')
+        .select('*')
+        .eq('id', broadcastId)
+        .single();
+
+      if (bcError) throw bcError;
+      setBroadcast(bc);
+
+      const { data: recs, error: recsError } = await supabase
+        .from('broadcast_recipients')
+        .select('*, contact:contacts(*)')
+        .eq('broadcast_id', broadcastId)
+        .order('created_at', { ascending: false });
+
+      if (recsError) throw recsError;
+      setRecipients(recs ?? []);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load broadcast');
+    } finally {
+      setLoading(false);
+    }
+  }, [broadcastId]);
+
   useEffect(() => {
-    async function fetchData() {
-      try {
-        const supabase = createClient();
+    fetchData();
+  }, [fetchData]);
 
-        const { data: bc, error: bcError } = await supabase
-          .from('broadcasts')
-          .select('*')
-          .eq('id', broadcastId)
-          .single();
+  async function handleSendDraft() {
+    if (!broadcast) return;
+    const supabase = createClient();
 
-        if (bcError) throw bcError;
-        setBroadcast(bc);
+    const { data: templateData, error: templateError } = await supabase
+      .from('message_templates')
+      .select('*')
+      .eq('name', broadcast.template_name)
+      .eq('language', broadcast.template_language)
+      .single();
 
-        const { data: recs, error: recsError } = await supabase
-          .from('broadcast_recipients')
-          .select('*, contact:contacts(*)')
-          .eq('broadcast_id', broadcastId)
-          .order('created_at', { ascending: false });
-
-        if (recsError) throw recsError;
-        setRecipients(recs ?? []);
-      } catch (err) {
-        setError(err instanceof Error ? err.message : 'Failed to load broadcast');
-      } finally {
-        setLoading(false);
-      }
+    if (templateError || !templateData) {
+      toast.error(`Template "${broadcast.template_name}" não encontrado.`);
+      return;
     }
 
-    fetchData();
-  }, [broadcastId]);
+    const af = (broadcast.audience_filter ?? {}) as Record<string, unknown>;
+    const audience: AudienceConfig = {
+      type: (af.type as AudienceConfig['type']) ?? 'all',
+      tagIds: af.tagIds as string[] | undefined,
+      excludeTagIds: af.excludeTagIds as string[] | undefined,
+      csvContacts: af.csvContacts as { phone: string; name?: string }[] | undefined,
+      customField: af.customField as AudienceConfig['customField'] | undefined,
+    };
+    const variables = (broadcast.template_variables ?? {}) as Record<string, VariableMapping>;
+
+    try {
+      await createAndSendBroadcast({
+        name: broadcast.name,
+        template: templateData as MessageTemplate,
+        audience,
+        variables,
+        existingBroadcastId: broadcast.id,
+      });
+      setLoading(true);
+      await fetchData();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Falha ao enviar broadcast');
+    }
+  }
 
   const filteredRecipients = useMemo(
     () =>
@@ -273,6 +316,16 @@ export default function BroadcastDetailPage() {
 
   return (
     <div className="space-y-6">
+      {/* Progress bar while sending a draft */}
+      {isProcessing && (
+        <div className="fixed inset-x-0 top-0 z-40 h-0.5 bg-muted">
+          <div
+            className="h-0.5 bg-primary transition-[width] duration-300"
+            style={{ width: `${progress}%` }}
+          />
+        </div>
+      )}
+
       {/* Header */}
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="flex items-center gap-4">
@@ -303,11 +356,34 @@ export default function BroadcastDetailPage() {
           </div>
         </div>
 
-        {/* Delete — inline-confirm pattern matches the pipeline-settings
-            "Delete Pipeline" flow. Mid-send broadcasts can't be deleted
-            because orphaning in-flight Meta messages would leave the
-            funnel inconsistent. */}
-        {confirmDelete ? (
+        <div className="flex items-center gap-2">
+          {/* Send button — only shown for drafts */}
+          {broadcast.status === 'draft' && (
+            <Button
+              size="sm"
+              disabled={isProcessing}
+              onClick={handleSendDraft}
+              className="bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
+            >
+              {isProcessing ? (
+                <>
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  Enviando… {progress}%
+                </>
+              ) : (
+                <>
+                  <Send className="h-3.5 w-3.5" />
+                  Enviar Broadcast
+                </>
+              )}
+            </Button>
+          )}
+
+          {/* Delete — inline-confirm pattern matches the pipeline-settings
+              "Delete Pipeline" flow. Mid-send broadcasts can't be deleted
+              because orphaning in-flight Meta messages would leave the
+              funnel inconsistent. */}
+          {confirmDelete ? (
           <div className="flex items-center gap-2 rounded-md border border-red-500/30 bg-red-500/10 px-3 py-1.5 text-sm">
             <span className="text-red-300">Delete this broadcast?</span>
             <Button
@@ -345,6 +421,7 @@ export default function BroadcastDetailPage() {
             Delete
           </Button>
         )}
+        </div>
       </div>
 
       {/* Stats — 6 cards: Total / Sent / Delivered / Read / Replied / Failed */}

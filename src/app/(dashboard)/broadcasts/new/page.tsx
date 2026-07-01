@@ -109,6 +109,9 @@ export default function NewBroadcastPage() {
       audience_filter: {
         type: audience.type,
         tagIds: audience.tagIds,
+        excludeTagIds: audience.excludeTagIds,
+        csvContacts: audience.csvContacts,
+        customField: audience.customField,
       },
       status: 'draft',
       total_recipients: 0,
