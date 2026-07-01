@@ -20,6 +20,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import {
   ArrowLeft,
   Loader2,
@@ -33,6 +34,7 @@ import {
   Download,
   ChevronDown,
   Trash2,
+  RotateCw,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import {
@@ -146,7 +148,8 @@ export default function BroadcastDetailPage() {
   const params = useParams();
   const router = useRouter();
   const broadcastId = params.id as string;
-  const { createAndSendBroadcast, isProcessing, progress } = useBroadcastSending();
+  const { createAndSendBroadcast, resendFailedRecipients, isProcessing, progress } =
+    useBroadcastSending();
 
   const [broadcast, setBroadcast] = useState<Broadcast | null>(null);
   const [recipients, setRecipients] = useState<BroadcastRecipient[]>([]);
@@ -157,6 +160,10 @@ export default function BroadcastDetailPage() {
   );
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  // Tracks which resend is in flight ('all' or a specific recipient id) so
+  // the header button and the per-row icon can show their own spinner
+  // instead of both lighting up whenever `isProcessing` is true.
+  const [resendTarget, setResendTarget] = useState<string | 'all' | null>(null);
 
   const fetchData = useCallback(async () => {
     try {
@@ -228,6 +235,29 @@ export default function BroadcastDetailPage() {
       await fetchData();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Falha ao enviar broadcast');
+    }
+  }
+
+  async function handleResend(recipientIds?: string[]) {
+    if (isProcessing) return;
+    setResendTarget(recipientIds && recipientIds.length === 1 ? recipientIds[0] : 'all');
+    try {
+      const { resent, stillFailed } = await resendFailedRecipients(
+        broadcastId,
+        recipientIds,
+      );
+      if (resent === 0 && stillFailed === 0) {
+        toast.info('Nenhum destinatário com falha para reenviar.');
+      } else if (stillFailed === 0) {
+        toast.success(`${resent} mensagem${resent === 1 ? '' : 's'} reenviada${resent === 1 ? '' : 's'} com sucesso.`);
+      } else {
+        toast.warning(`${resent} reenviada${resent === 1 ? '' : 's'}, ${stillFailed} continua${stillFailed === 1 ? '' : 'm'} com falha.`);
+      }
+      await fetchData();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Falha ao reenviar mensagens');
+    } finally {
+      setResendTarget(null);
     }
   }
 
@@ -378,6 +408,41 @@ export default function BroadcastDetailPage() {
               )}
             </Button>
           )}
+
+          {/* Resend failures — only once there's something to resend and
+              nothing is currently sending/draft. */}
+          {broadcast.status !== 'draft' &&
+            broadcast.status !== 'sending' &&
+            broadcast.failed_count > 0 && (
+              <Tooltip>
+                <TooltipTrigger
+                  render={
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={isProcessing}
+                      onClick={() => handleResend()}
+                      className="border-border text-muted-foreground hover:bg-muted disabled:opacity-50"
+                    />
+                  }
+                >
+                  {isProcessing && resendTarget === 'all' ? (
+                    <>
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      Reenviando… {progress}%
+                    </>
+                  ) : (
+                    <>
+                      <RotateCw className="h-3.5 w-3.5" />
+                      Reenviar falhas
+                    </>
+                  )}
+                </TooltipTrigger>
+                <TooltipContent>
+                  Somente os destinatários com status &quot;Failed&quot; serão reenviados.
+                </TooltipContent>
+              </Tooltip>
+            )}
 
           {/* Delete — inline-confirm pattern matches the pipeline-settings
               "Delete Pipeline" flow. Mid-send broadcasts can't be deleted
@@ -554,6 +619,9 @@ export default function BroadcastDetailPage() {
                   <TableHead className="text-muted-foreground">Delivered</TableHead>
                   <TableHead className="text-muted-foreground">Read</TableHead>
                   <TableHead className="text-muted-foreground">Error</TableHead>
+                  <TableHead className="w-12 px-1 text-center text-muted-foreground">
+                    Options
+                  </TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -589,8 +657,34 @@ export default function BroadcastDetailPage() {
                           ? new Date(recipient.read_at).toLocaleString()
                           : '-'}
                       </TableCell>
-                      <TableCell className="max-w-xs truncate text-xs text-red-400">
+                      <TableCell
+                        className="max-w-[10rem] truncate text-xs text-red-400"
+                        title={recipient.error_message ?? undefined}
+                      >
                         {recipient.error_message ?? '-'}
+                      </TableCell>
+                      <TableCell className="px-1 text-center">
+                        {recipient.status === 'failed' && (
+                          <Tooltip>
+                            <TooltipTrigger
+                              render={
+                                <button
+                                  type="button"
+                                  disabled={isProcessing}
+                                  onClick={() => handleResend([recipient.id])}
+                                  className="rounded-md p-1.5 text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-40"
+                                />
+                              }
+                            >
+                              {isProcessing && resendTarget === recipient.id ? (
+                                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                              ) : (
+                                <Send className="h-3.5 w-3.5" />
+                              )}
+                            </TooltipTrigger>
+                            <TooltipContent>Reenviar para este contato</TooltipContent>
+                          </Tooltip>
+                        )}
                       </TableCell>
                     </TableRow>
                   );
