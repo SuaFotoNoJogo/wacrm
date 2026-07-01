@@ -218,7 +218,7 @@ export default function BroadcastDetailPage() {
       type: (af.type as AudienceConfig['type']) ?? 'all',
       tagIds: af.tagIds as string[] | undefined,
       excludeTagIds: af.excludeTagIds as string[] | undefined,
-      csvContacts: af.csvContacts as { phone: string; name?: string }[] | undefined,
+      csvContacts: af.csvContacts as AudienceConfig['csvContacts'],
       customField: af.customField as AudienceConfig['customField'] | undefined,
     };
     const variables = (broadcast.template_variables ?? {}) as Record<string, VariableMapping>;

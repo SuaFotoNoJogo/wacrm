@@ -15,6 +15,7 @@ import {
   DialogTrigger,
 } from '@/components/ui/dialog';
 import { ArrowLeft, Send, Loader2, Users, Save } from 'lucide-react';
+import type { ParsedContactRow } from '@/lib/contacts/parse-contact-csv';
 
 interface AudienceConfig {
   type: string;
@@ -24,7 +25,7 @@ interface AudienceConfig {
     operator: 'is' | 'is_not' | 'contains';
     value: string;
   };
-  csvContacts?: { phone: string; name?: string }[];
+  csvContacts?: ParsedContactRow[];
   excludeTagIds?: string[];
 }
 

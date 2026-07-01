@@ -7,6 +7,7 @@ import { isStandardFieldName } from '@/lib/contacts/standard-field-names';
 import { CustomField, Tag } from '@/types';
 import { Button } from '@/components/ui/button';
 import { CsvUploadModal } from './csv-upload-modal';
+import type { ParsedContactRow } from '@/lib/contacts/parse-contact-csv';
 import {
   Users,
   Tags,
@@ -51,7 +52,7 @@ interface AudienceConfig {
   type: AudienceType;
   tagIds?: string[];
   customField?: CustomFieldFilter;
-  csvContacts?: { phone: string; name?: string }[];
+  csvContacts?: ParsedContactRow[];
   excludeTagIds?: string[];
 }
 
@@ -279,7 +280,7 @@ export function Step2SelectAudience({
     onUpdate({ ...audience, customField: { ...prev, ...patch } });
   }
 
-  function handleCsvUpload(contacts: { phone: string; name?: string }[]) {
+  function handleCsvUpload(contacts: ParsedContactRow[]) {
     onUpdate({ ...audience, csvContacts: contacts });
   }
 

@@ -5,6 +5,17 @@ import { createClient } from '@/lib/supabase/client';
 import { toNFC } from '@/lib/text/unicode';
 import { useAuth } from '@/hooks/use-auth';
 import { Contact, MessageTemplate } from '@/types';
+import type { ParsedContactRow } from '@/lib/contacts/parse-contact-csv';
+import {
+  resolveImportTagIds,
+  assignImportedContactTags,
+  type ContactTagAssignment,
+} from '@/lib/contacts/resolve-import-tags';
+import {
+  resolveImportCustomFieldIds,
+  assignImportedContactCustomValues,
+  type ContactCustomFieldAssignment,
+} from '@/lib/contacts/resolve-import-custom-fields';
 
 export type CustomFieldOperator = 'is' | 'is_not' | 'contains';
 
@@ -18,7 +29,7 @@ export interface AudienceConfig {
   type: 'all' | 'tags' | 'custom_field' | 'csv';
   tagIds?: string[];
   customField?: CustomFieldFilter;
-  csvContacts?: { phone: string; name?: string }[];
+  csvContacts?: ParsedContactRow[];
   /** Contacts carrying any of these tags are subtracted from the result. */
   excludeTagIds?: string[];
 }
@@ -195,7 +206,7 @@ async function fetchCustomValueIndex(
 }
 
 export function useBroadcastSending(): UseBroadcastSendingReturn {
-  const { accountId } = useAuth();
+  const { accountId, canEditSettings } = useAuth();
   const [isProcessing, setIsProcessing] = useState(false);
   const [progress, setProgress] = useState(0);
 
@@ -253,19 +264,23 @@ export function useBroadcastSending(): UseBroadcastSendingReturn {
   }
 
   /**
-   * CSV uploads arrive as raw phone/name pairs, not DB rows. Before we
-   * can insert broadcast_recipients (whose contact_id FKs contacts.id),
-   * we need real contacts.id UUIDs. So: look up each CSV phone in the
-   * caller's contacts table; insert any that don't exist; return the
+   * CSV uploads arrive as parsed rows, not DB rows. Before we can insert
+   * broadcast_recipients (whose contact_id FKs contacts.id), we need real
+   * contacts.id UUIDs. So: look up each CSV phone in the account's
+   * contacts table; insert any that don't exist (with name/email/company);
+   * resolve + assign any tags and custom field values the CSV carried
+   * (same resolution helpers the full Contacts import uses); return the
    * resolved set.
    *
    * Pre-existing implementation synthesized `csv-N` strings as
    * contact_id, which failed the UUID cast on insert — every CSV
-   * broadcast silently created zero recipients.
+   * broadcast silently created zero recipients. It also only carried
+   * phone/name, silently dropping email/company/tags/custom fields from
+   * the CSV.
    */
   async function upsertCsvContacts(
     supabase: ReturnType<typeof createClient>,
-    csvRows: { phone: string; name?: string }[],
+    csvRows: ParsedContactRow[],
   ): Promise<Contact[]> {
     if (csvRows.length === 0) return [];
 
@@ -281,17 +296,17 @@ export function useBroadcastSending(): UseBroadcastSendingReturn {
     }
 
     // De-duplicate by phone within the CSV (users can paste duplicates).
-    const uniqueByPhone = new Map<string, { phone: string; name?: string }>();
+    const uniqueByPhone = new Map<string, ParsedContactRow>();
     for (const row of csvRows) {
       if (row.phone) uniqueByPhone.set(row.phone, row);
     }
     const phones = [...uniqueByPhone.keys()];
 
-    // Single round-trip lookup of existing contacts by phone.
+    // Single round-trip lookup of existing contacts in this account.
     const { data: existing, error: lookupErr } = await supabase
       .from('contacts')
       .select('*')
-      .eq('user_id', user.id)
+      .eq('account_id', accountId)
       .in('phone', phones);
     if (lookupErr) {
       throw new Error(`Failed to look up CSV contacts: ${lookupErr.message}`);
@@ -306,12 +321,17 @@ export function useBroadcastSending(): UseBroadcastSendingReturn {
     // has a default payload cap — 200 keeps individual requests small).
     const missing = phones
       .filter((p) => !byPhone.has(p))
-      .map((phone) => ({
-        user_id: user.id,
-        account_id: accountId,
-        phone,
-        name: uniqueByPhone.get(phone)?.name ?? null,
-      }));
+      .map((phone) => {
+        const row = uniqueByPhone.get(phone)!;
+        return {
+          user_id: user.id,
+          account_id: accountId,
+          phone,
+          name: row.name || null,
+          email: row.email || null,
+          company: row.company || null,
+        };
+      });
 
     const INSERT_CHUNK = 200;
     for (let i = 0; i < missing.length; i += INSERT_CHUNK) {
@@ -326,6 +346,59 @@ export function useBroadcastSending(): UseBroadcastSendingReturn {
       for (const c of (inserted ?? []) as Contact[]) {
         if (c.phone) byPhone.set(c.phone, c);
       }
+    }
+
+    // Resolve + assign tags (admin+ may auto-create missing ones — same
+    // rule the Contacts import screen uses). Applied to every matched
+    // row, not just newly-created contacts: uploading a CSV to build a
+    // broadcast audience is itself a tagging action for pre-existing
+    // contacts too.
+    const allTagNames = phones.flatMap((p) => uniqueByPhone.get(p)!.tagNames);
+    if (allTagNames.length > 0) {
+      const { tagIdByKey } = await resolveImportTagIds(supabase, {
+        accountId,
+        userId: user.id,
+        tagNames: allTagNames,
+        canCreateTags: canEditSettings,
+      });
+      const tagAssignments: ContactTagAssignment[] = phones
+        .map((p) => {
+          const row = uniqueByPhone.get(p)!;
+          const contact = byPhone.get(p);
+          return contact && row.tagNames.length > 0
+            ? { contactId: contact.id, tagNames: row.tagNames }
+            : null;
+        })
+        .filter((a): a is ContactTagAssignment => a !== null);
+      await assignImportedContactTags(supabase, tagAssignments, tagIdByKey);
+    }
+
+    // Resolve + assign custom field values. Not auto-created — a CSV
+    // header that doesn't match an existing custom field is silently
+    // skipped, same as the Contacts import screen.
+    const customFieldNames = [
+      ...new Set(
+        phones.flatMap((p) => Object.keys(uniqueByPhone.get(p)!.customFieldValues)),
+      ),
+    ];
+    if (customFieldNames.length > 0) {
+      const { fieldIdByName } = await resolveImportCustomFieldIds(supabase, {
+        accountId,
+        fieldNames: customFieldNames,
+      });
+      const customFieldAssignments: ContactCustomFieldAssignment[] = [];
+      for (const p of phones) {
+        const row = uniqueByPhone.get(p)!;
+        const contact = byPhone.get(p);
+        if (!contact) continue;
+        for (const [fieldName, value] of Object.entries(row.customFieldValues)) {
+          const fieldId = fieldIdByName.get(fieldName);
+          if (fieldId) {
+            customFieldAssignments.push({ contactId: contact.id, fieldId, value });
+          }
+        }
+      }
+      await assignImportedContactCustomValues(supabase, customFieldAssignments);
     }
 
     // Preserve input order so analytics roughly matches the CSV order.

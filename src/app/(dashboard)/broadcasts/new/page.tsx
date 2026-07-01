@@ -11,6 +11,7 @@ import { Step2SelectAudience } from '@/components/broadcasts/step2-select-audien
 import { Step3Personalize } from '@/components/broadcasts/step3-personalize';
 import { Step4ScheduleSend } from '@/components/broadcasts/step4-schedule-send';
 import { useBroadcastSending } from '@/hooks/use-broadcast-sending';
+import type { ParsedContactRow } from '@/lib/contacts/parse-contact-csv';
 import { Check } from 'lucide-react';
 
 const steps = [
@@ -35,7 +36,7 @@ export default function NewBroadcastPage() {
       operator: 'is' | 'is_not' | 'contains';
       value: string;
     };
-    csvContacts?: { phone: string; name?: string }[];
+    csvContacts?: ParsedContactRow[];
     excludeTagIds?: string[];
   }>({ type: 'all' });
   const [variables, setVariables] = useState<
